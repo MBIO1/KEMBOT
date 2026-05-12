@@ -107,7 +107,9 @@ export default function App() {
       upperPrice: 4000,
       lowerPrice: 3000,
       numGrids: 10,
-      sizePerGrid: 0.1
+      sizePerGrid: 0.1,
+      tp: "" as string | number,
+      sl: "" as string | number
     }
   });
 
@@ -269,7 +271,9 @@ export default function App() {
         upperPrice: 4000,
         lowerPrice: 3000,
         numGrids: 10,
-        sizePerGrid: 0.1
+        sizePerGrid: 0.1,
+        tp: "",
+        sl: ""
       }
     });
     setIsModalOpen(true);
@@ -315,6 +319,16 @@ export default function App() {
         return false;
       }
     }
+
+    if (config.tp && Number(config.tp) <= 0) {
+      addToast("Take Profit must be a positive percentage.", "error");
+      return false;
+    }
+    if (config.sl && Number(config.sl) <= 0) {
+      addToast("Stop Loss must be a positive percentage.", "error");
+      return false;
+    }
+
     return true;
   };
 
@@ -333,14 +347,18 @@ export default function App() {
           name: finalName,
           strategy,
           symbol,
-          config: strategy === "DCA" 
-            ? { intervalMinutes: Number(config.intervalMinutes), sizeUsd: Number(config.sizeUsd) }
-            : { 
-                upperPrice: Number(config.upperPrice), 
-                lowerPrice: Number(config.lowerPrice), 
-                numGrids: Number(config.numGrids), 
-                sizePerGrid: Number(config.sizePerGrid) 
-              }
+          config: {
+            ...(strategy === "DCA" 
+              ? { intervalMinutes: Number(config.intervalMinutes), sizeUsd: Number(config.sizeUsd) }
+              : { 
+                  upperPrice: Number(config.upperPrice), 
+                  lowerPrice: Number(config.lowerPrice), 
+                  numGrids: Number(config.numGrids), 
+                  sizePerGrid: Number(config.sizePerGrid) 
+                }),
+            tp: config.tp ? Number(config.tp) : null,
+            sl: config.sl ? Number(config.sl) : null
+          }
         })
       });
       
@@ -938,7 +956,28 @@ export default function App() {
                          </div>
                        )}
                     </div>
-                  </div>
+                   </div>
+
+                        <div className="grid grid-cols-2 gap-8 pt-8 border-t border-white/5">
+                           <FormGroup label="Take Profit (%)">
+                              <input 
+                                type="number"
+                                placeholder="Optional"
+                                value={botForm.config.tp}
+                                onChange={(e) => setBotForm({ ...botForm, config: { ...botForm.config, tp: e.target.value } })}
+                                className="w-full bg-[#050608] border border-white/10 rounded-xl px-4 py-4 text-sm font-black text-emerald-400 focus:ring-2 focus:ring-emerald-500/20 outline-none"
+                              />
+                           </FormGroup>
+                           <FormGroup label="Stop Loss (%)">
+                              <input 
+                                type="number"
+                                placeholder="Optional"
+                                value={botForm.config.sl}
+                                onChange={(e) => setBotForm({ ...botForm, config: { ...botForm.config, sl: e.target.value } })}
+                                className="w-full bg-[#050608] border border-white/10 rounded-xl px-4 py-4 text-sm font-black text-rose-400 focus:ring-2 focus:ring-rose-500/20 outline-none"
+                              />
+                           </FormGroup>
+                        </div>
 
                   <div className="p-10 bg-black/40 border-t border-white/5 flex gap-4">
                     <button 
