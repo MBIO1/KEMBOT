@@ -6,6 +6,7 @@ import db from './src/backend/db/session.ts';
 import { config } from './src/backend/config.ts';
 import { BotManager } from './src/backend/botManager.ts';
 import { HyperliquidClient } from './src/backend/exchange/hyperliquidClient.ts';
+import { HyperliquidSignalService } from './src/backend/signals/hyperliquidSignalService.ts';
 import { RiskEngine } from './src/backend/risk/riskEngine.ts';
 
 async function startServer() {
@@ -18,6 +19,7 @@ async function startServer() {
   const botManager = new BotManager();
   await botManager.initFromDb();
   const hlClient = new HyperliquidClient();
+  const signalService = new HyperliquidSignalService(hlClient);
 
   app.get('/api/bots', (req, res) => {
     const bots = db.prepare('SELECT * FROM bots').all();
@@ -93,6 +95,24 @@ async function startServer() {
   app.get('/api/orders', (req, res) => {
     const orders = db.prepare('SELECT * FROM orders ORDER BY created_at DESC LIMIT 50').all();
     res.json(orders);
+  });
+
+  app.get('/api/top-pairs', async (req, res) => {
+    try {
+      const pairs = await signalService.getTopTradedPairs();
+      res.json(pairs);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get('/api/signals', async (req, res) => {
+    try {
+      const signals = await signalService.getTopSignals();
+      res.json(signals);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
   });
 
   app.post('/api/kill-switch', async (req, res) => {

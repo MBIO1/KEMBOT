@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
-    "test": "tsx tests/test_risk.ts && tsx tests/test_strategies.ts && tsx tests/test_hyperliquid_signing.ts"
+    "test": "tsx tests/test_risk.ts && tsx tests/test_strategies.ts && tsx tests/test_hyperliquid_signing.ts && tsx tests/test_signals.ts"
   },
   "dependencies": {
     "@google/genai": "^1.29.0",

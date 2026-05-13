@@ -2,9 +2,11 @@ import { GridStrategy } from './strategies/grid.ts';
 import { DCAStrategy } from './strategies/dca.ts';
 import db from './db/session.ts';
 import { RiskEngine } from './risk/riskEngine.ts';
+import { HyperliquidSignalService } from './signals/hyperliquidSignalService.ts';
 
 export class BotManager {
   private activeBots: Map<string, any> = new Map();
+  private signalService = new HyperliquidSignalService();
 
   async startBot(id: string) {
     if (RiskEngine.isGlobalKillSwitchActive()) {
@@ -15,6 +17,14 @@ export class BotManager {
     if (!botData) throw new Error('Bot not found');
 
     const config = JSON.parse(botData.config);
+
+    if (config.useTopPairsOnly !== false) {
+      const allowed = await this.signalService.isSymbolAllowed(botData.symbol);
+      if (!allowed) {
+        throw new Error(`Symbol ${botData.symbol} is not one of the top ${config.topTradingPairs || 5} Hyperliquid traded pairs.`);
+      }
+    }
+
     let bot;
 
     if (botData.strategy === 'GRID') {

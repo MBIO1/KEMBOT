@@ -96,6 +96,21 @@ export class HyperliquidClient {
     }
   }
 
+  async getTradingHistory(symbol: string, days: number) {
+    const types = ['priceHistory', 'ohlc', 'candles', 'history', 'tradeHistory'];
+    for (const type of types) {
+      try {
+        const data = await this.getInfo({ type, symbol, days });
+        if (Array.isArray(data) && data.length > 0) {
+          return data;
+        }
+      } catch (error) {
+        // Try next available history endpoint.
+      }
+    }
+    return [];
+  }
+
   public getOrderTypedData(order: HyperliquidOrder): TypedData {
     if (!this.walletAddress) {
       throw new Error('Wallet address required to build order payload');
