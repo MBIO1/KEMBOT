@@ -18,7 +18,9 @@ import {
   Search,
   Bell,
   Settings,
-  Trash2
+  Trash2,
+  X,
+  Zap
 } from "lucide-react";
 import { 
   LineChart, 
@@ -33,27 +35,32 @@ import {
 } from "recharts";
 import { motion, AnimatePresence } from "motion/react";
 
-// Mock PnL data for the chart
-const pnlData = [
-  { name: "00:00", pnl: 0, vol: 1200 },
-  { name: "04:00", pnl: 12, vol: 2400 },
-  { name: "08:00", pnl: -5, vol: 1800 },
-  { name: "12:00", pnl: 25, vol: 4500 },
-  { name: "16:00", pnl: 48, vol: 3200 },
-  { name: "20:00", pnl: 32, vol: 2900 },
-  { name: "23:59", pnl: 54, vol: 3800 },
-];
-
+// Live PnL history will be fetched from API
 export default function App() {
+  const [account, setAccount] = useState<any>(null);
   const [bots, setBots] = useState<any[]>([]);
   const [orders, setOrders] = useState<any[]>([]);
+  const [pnlHistory, setPnlHistory] = useState<any[]>([]);
+  const [globalStats, setGlobalStats] = useState<any>(null);
   const [positions, setPositions] = useState<any[]>([]);
   const [markets, setMarkets] = useState<any[]>([]);
   const [marketSearch, setMarketSearch] = useState("");
   const [marketSort, setMarketSort] = useState<"volume" | "change" | "symbol">("volume");
   const [activeTab, setActiveTab] = useState("dashboard");
+  const [backtestResults, setBacktestResults] = useState<any>(null);
+  const [backtestLoading, setBacktestLoading] = useState(false);
+  const [backtestConfig, setBacktestConfig] = useState({
+    feeRate: 0.0001,
+    slippage: 0.0001,
+    latencyMs: 100,
+    startBalance: 10000
+  });
+  const [selectedAsset, setSelectedAsset] = useState("BTC");
   const [loading, setLoading] = useState(true);
+  const [systemStatus, setSystemStatus] = useState<any>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [isOrderModalOpen, setIsOrderModalOpen] = useState(false);
   const [selectedOrder, setSelectedOrder] = useState<any>(null);
   const [presets, setPresets] = useState<any[]>([]);
   const [toasts, setToasts] = useState<any[]>([]);
@@ -97,6 +104,9 @@ export default function App() {
     prevOrders.current = orders;
   }, [orders]);
 
+  const currentPnl = account && systemStatus ? (parseFloat(account.accountValue) - systemStatus.circuitBreaker.initialEquity) : 0;
+  const currentPnlPct = systemStatus?.circuitBreaker?.initialEquity ? (currentPnl / systemStatus.circuitBreaker.initialEquity) * 100 : 0;
+
   const [botForm, setBotForm] = useState({
     name: "",
     strategy: "DCA",
@@ -115,57 +125,89 @@ export default function App() {
 
   const fetchData = async () => {
     try {
-      const controllers = [new AbortController(), new AbortController(), new AbortController(), new AbortController()];
-      const timeout = setTimeout(() => controllers.forEach(c => c.abort()), 8000);
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15000);
 
-      const [botsRes, ordersRes, posRes, marketRes] = await Promise.all([
-        fetch("/api/bots", { signal: controllers[0].signal }).then(r => r.ok ? r.json() : Promise.reject("Failed to fetch bots")).catch(err => ({ error: err.message || err })),
-        fetch("/api/orders", { signal: controllers[1].signal }).then(r => r.ok ? r.json() : Promise.reject("Failed to fetch orders")).catch(err => ({ error: err.message || err })),
-        fetch("/api/positions", { signal: controllers[2].signal }).then(r => r.ok ? r.json() : Promise.reject("Failed to fetch positions")).catch(err => ({ error: err.message || err })),
-        fetch("/api/markets", { signal: controllers[3].signal }).then(r => r.ok ? r.json() : Promise.reject("Failed to fetch markets")).catch(err => ({ error: err.message || err }))
+      const fetchJson = async (url: string, fallback: any = { error: 'Unknown error' }) => {
+        try {
+          const res = await fetch(url, { signal: controller.signal });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          return await res.json();
+        } catch (err: any) {
+          if (err.name === 'AbortError') return { error: 'Timeout' };
+          return fallback instanceof Array ? [] : { ...fallback, error: err.message };
+        }
+      };
+
+      const [botsRes, ordersRes, accRes, marketRes, systemRes, statsRes, pnlRes] = await Promise.all([
+        fetchJson("/api/bots", []),
+        fetchJson("/api/orders", []),
+        fetchJson("/api/account", { error: true }),
+        fetchJson("/api/markets", []),
+        fetchJson("/api/system/status", { error: true }),
+        fetchJson("/api/stats", {}),
+        fetchJson("/api/pnl-history", [])
       ]);
 
       clearTimeout(timeout);
       
-      if (botsRes.error || ordersRes.error || posRes.error || marketRes.error) {
-        addToast("Network synchronization error. Retrying...", "error");
+      if (botsRes.error || ordersRes.error || accRes.error || marketRes.error || systemRes.error) {
+        console.warn("Sync warnings:", { botsRes, ordersRes, accRes, marketRes, systemRes });
       }
 
       setBots(Array.isArray(botsRes) ? botsRes : []);
       setOrders(Array.isArray(ordersRes) ? ordersRes : []);
-      setPositions(Array.isArray(posRes) ? posRes : []);
+      setAccount(accRes.error ? null : accRes);
+      setPositions(accRes.positions || []);
+      setSystemStatus(systemRes.error ? null : systemRes);
+      setGlobalStats(statsRes);
+      setPnlHistory(Array.isArray(pnlRes) ? pnlRes : []);
       
       if (Array.isArray(marketRes)) {
         setMarkets(prev => {
-          // Create a lookup for current prices to preserve WS updates
+          if (prev.length === 0) return marketRes;
           const priceMap = new Map(prev.map(m => [m.symbol, m.price]));
           return marketRes.map(m => ({
             ...m,
-            // Prefer the current price in state if it exists (likely from WS)
-            // but for the first load, use the polled price.
             price: priceMap.get(m.symbol) || m.price
           }));
         });
       }
     } catch (e: any) {
       console.error("Fetch error", e);
-      addToast("Failed to connect to server.", "error");
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    const savedPresets = localStorage.getItem("hyperquant_presets");
-    if (savedPresets) setPresets(JSON.parse(savedPresets));
+    try {
+      const savedPresets = localStorage.getItem("hyperquant_presets");
+      if (savedPresets) setPresets(JSON.parse(savedPresets));
+    } catch (e) {
+      console.warn("Failed to load presets from localStorage", e);
+    }
     fetchData();
     const interval = setInterval(fetchData, 5000);
     return () => clearInterval(interval);
   }, []);
 
+  const handleResetBreaker = async () => {
+    try {
+      const res = await fetch("/api/system/reset-breaker", { method: "POST" });
+      if (res.ok) {
+        addToast("Circuit breaker has been manually reset.", "success");
+        fetchData();
+      }
+    } catch (e) {
+      addToast("Failed to reset safeguard.", "error");
+    }
+  };
+
   useEffect(() => {
     let ws: WebSocket | null = null;
     let reconnectTimeout: any = null;
+    let reconnectAttempts = 0;
 
     const setupWS = async () => {
       try {
@@ -177,6 +219,7 @@ export default function App() {
 
         ws.onopen = () => {
           console.log("Hyperliquid WS Connected");
+          reconnectAttempts = 0;
           ws?.send(JSON.stringify({
             method: "subscribe",
             subscription: { type: "allMids" }
@@ -196,17 +239,22 @@ export default function App() {
           }
         };
 
-        ws.onerror = (err) => {
-          console.error("WebSocket Error:", err);
-        };
-
         ws.onclose = () => {
           console.log("WebSocket Closed, attempting reconnect...");
-          reconnectTimeout = setTimeout(setupWS, 5000);
+          const delay = Math.min(30000, 1000 * Math.pow(2, reconnectAttempts));
+          reconnectAttempts++;
+          reconnectTimeout = setTimeout(setupWS, delay);
+        };
+
+        ws.onerror = (err) => {
+          console.error("WebSocket Error:", err);
+          ws?.close();
         };
       } catch (err) {
         console.error("Failed to setup WebSocket:", err);
-        reconnectTimeout = setTimeout(setupWS, 5000);
+        const delay = Math.min(30000, 1000 * Math.pow(2, reconnectAttempts));
+        reconnectAttempts++;
+        reconnectTimeout = setTimeout(setupWS, delay);
       }
     };
 
@@ -277,6 +325,32 @@ export default function App() {
       }
     });
     setIsModalOpen(true);
+  };
+
+  const openOrderModal = () => {
+    setIsOrderModalOpen(true);
+  };
+
+  const handleManualOrder = async (orderData: any) => {
+    try {
+      const res = await fetch("/api/orders", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(orderData)
+      });
+      const data = await res.json();
+      if (data.status === "ok") {
+        addToast(
+          `Manual ${orderData.isBuy ? "BUY" : "SELL"} order placed successfully.`,
+          "success"
+        );
+        fetchData();
+      } else {
+        addToast(`Order failed: ${data.message || "Unknown error"}`, "error");
+      }
+    } catch (e) {
+      addToast("Order execution failed.", "error");
+    }
   };
 
   const validateForm = (data = botForm) => {
@@ -374,17 +448,24 @@ export default function App() {
     }
   };
 
+  const [presetNameInput, setPresetNameInput] = useState("");
+  const [showPresetNaming, setShowPresetNaming] = useState(false);
+
   const saveAsPreset = () => {
     if (!validateForm()) return;
-    const defaultName = botForm.name || `${botForm.strategy} ${botForm.symbol} ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
-    const name = prompt("Enter a name for this preset:", defaultName);
-    
-    if (name === null) return; // Cancelled
+    if (!presetNameInput) {
+      setShowPresetNaming(true);
+      const defaultName = botForm.name || `${botForm.strategy} ${botForm.symbol} ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+      setPresetNameInput(defaultName);
+      return;
+    }
 
-    const newPresets = [...presets, { ...botForm, presetName: name, id: Date.now() }];
+    const newPresets = [...presets, { ...botForm, presetName: presetNameInput, id: Date.now() }];
     setPresets(newPresets);
     localStorage.setItem("hyperquant_presets", JSON.stringify(newPresets));
-    addToast(`Config '${name}' saved to library.`, "success");
+    addToast(`Config '${presetNameInput}' saved to library.`, "success");
+    setPresetNameInput("");
+    setShowPresetNaming(false);
   };
 
   const deletePreset = (id: number, e: React.MouseEvent) => {
@@ -401,14 +482,99 @@ export default function App() {
     addToast(`Preset applied: ${preset.presetName || preset.strategy}`, "success");
   };
 
+  const runBacktest = async () => {
+    setBacktestLoading(true);
+    setBacktestResults(null); 
+    try {
+      const res = await fetch("/api/backtest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          strategy: botForm.strategy,
+          symbol: botForm.symbol,
+          config: botForm.config,
+          backtestConfig: {
+            ...backtestConfig,
+            symbol: botForm.symbol
+          }
+        })
+      });
+      
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || "Simulation failed");
+      }
+      
+      setBacktestResults(data);
+      addToast("Backtest completed successfully.", "success");
+    } catch (e: any) {
+      addToast(e.message || "Backtest execution failed.", "error");
+    } finally {
+      setBacktestLoading(false);
+    }
+  };
+
+  const initializeQuickBot = async (symbol: "BTC" | "ETH") => {
+    const defaultData = {
+      name: `QUICK_${symbol}_DCA`,
+      strategy: "DCA",
+      symbol,
+      config: {
+        intervalMinutes: 60,
+        sizeUsd: 10,
+        tp: null,
+        sl: null
+      }
+    };
+
+    try {
+      const res = await fetch("/api/bots", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(defaultData)
+      });
+      
+      if (res.ok) {
+        const bot = await res.json();
+        addToast(`${symbol} DCA bot initialized. Activating...`, "success");
+        handleStartBot(bot.id);
+      } else {
+        const err = await res.json();
+        addToast(`Initialization failed: ${err.error || "Unknown error"}`, "error");
+      }
+    } catch (e) {
+      addToast(`Failed to initialize ${symbol} bot.`, "error");
+    }
+  };
+
   return (
-    <div className="min-h-screen bg-[#050608] text-slate-100 font-sans selection:bg-cyan-500/30 overflow-hidden flex">
+    <div className="min-h-screen bg-[#050608] text-slate-100 font-sans selection:bg-cyan-500/30 overflow-hidden flex flex-col lg:flex-row">
+      {/* Mobile Header */}
+      <div className="lg:hidden bg-[#0A0C10] border-b border-white/5 p-4 flex justify-between items-center z-[50]">
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 bg-cyan-500 flex items-center justify-center rounded-lg shadow-[0_0_15px_rgba(34,211,238,0.3)]">
+            <Activity size={16} className="text-black" />
+          </div>
+          <h1 className="font-black text-sm tracking-tighter text-white leading-tight uppercase">Hyperquant</h1>
+        </div>
+        <button 
+          onClick={() => setIsSidebarOpen(!isSidebarOpen)}
+          className="p-2 text-slate-400 hover:text-white transition-colors"
+        >
+          {isSidebarOpen ? <X size={24} /> : <Zap size={24} />}
+        </button>
+      </div>
+
       {/* Glass Sidebar */}
-      <aside className="w-64 bg-[#0A0C10] border-r border-white/5 flex flex-col z-40 relative">
+      <aside className={`
+        fixed inset-y-0 left-0 z-40 w-64 bg-[#0A0C10] border-r border-white/5 flex flex-col transition-transform duration-300 transform
+        lg:translate-x-0 lg:static 
+        ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'}
+      `}>
         <div className="absolute inset-0 bg-gradient-to-b from-cyan-500/5 to-transparent pointer-events-none" />
         
         <div className="p-8 relative">
-          <div className="flex items-center gap-3 mb-12">
+          <div className="hidden lg:flex items-center gap-3 mb-12">
             <div className="w-10 h-10 bg-cyan-500 flex items-center justify-center rounded-lg shadow-[0_0_20px_rgba(34,211,238,0.3)]">
               <Activity size={20} className="text-black" />
             </div>
@@ -419,9 +585,11 @@ export default function App() {
           </div>
 
           <nav className="space-y-1">
-            <SidebarLink icon={<LayoutDashboard size={18} />} label="Mission Control" active={activeTab === "dashboard"} onClick={() => setActiveTab("dashboard")} />
-            <SidebarLink icon={<Layers size={18} />} label="Bot Registry" active={activeTab === "strategies"} onClick={() => setActiveTab("strategies")} />
-            <SidebarLink icon={<History size={18} />} label="Trade Ledger" active={activeTab === "history"} onClick={() => setActiveTab("history")} />
+            <SidebarLink icon={<LayoutDashboard size={18} />} label="Mission Control" active={activeTab === "dashboard"} onClick={() => { setActiveTab("dashboard"); setIsSidebarOpen(false); }} />
+            <SidebarLink icon={<TrendingUp size={18} />} label="Market Directory" active={activeTab === "markets"} onClick={() => { setActiveTab("markets"); setIsSidebarOpen(false); }} />
+            <SidebarLink icon={<Cpu size={18} />} label="Backtest Lab" active={activeTab === "backtest"} onClick={() => { setActiveTab("backtest"); setIsSidebarOpen(false); }} />
+            <SidebarLink icon={<Layers size={18} />} label="Bot Registry" active={activeTab === "strategies"} onClick={() => { setActiveTab("strategies"); setIsSidebarOpen(false); }} />
+            <SidebarLink icon={<History size={18} />} label="Trade Ledger" active={activeTab === "history"} onClick={() => { setActiveTab("history"); setIsSidebarOpen(false); }} />
             <SidebarLink icon={<Settings size={18} />} label="Network Config" active={false} onClick={() => {}} />
           </nav>
         </div>
@@ -430,19 +598,30 @@ export default function App() {
           <div className="absolute top-0 left-0 w-full h-[1px] bg-gradient-to-r from-transparent via-cyan-500/20 to-transparent" />
           
           <div className="space-y-4">
-            <div className="p-4 bg-slate-900/40 rounded-xl border border-white/5 backdrop-blur-xl">
-              <div className="flex justify-between items-center mb-1">
-                <span className="text-[10px] font-bold text-slate-500 tracking-widest flex items-center gap-1.5 uppercase">
-                  <Wallet size={12} className="text-cyan-500" />
-                  Testnet Vault
-                </span>
-                <span className="text-[10px] text-emerald-400 font-bold uppercase">Live</span>
+              <div className="p-4 bg-slate-900/40 rounded-xl border border-white/5 backdrop-blur-xl">
+                <div className="flex justify-between items-center mb-1">
+                  <span className="text-[10px] font-bold text-slate-500 tracking-widest flex items-center gap-1.5 uppercase">
+                    <Wallet size={12} className="text-cyan-500" />
+                    Portfolio Value
+                  </span>
+                  <span className="text-[10px] text-emerald-400 font-bold uppercase">Live</span>
+                </div>
+                <div className="text-xl font-bold text-white font-mono">
+                  ${parseFloat(account?.accountValue || "0").toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </div>
+                <div className="flex justify-between items-center mt-2">
+                  <span className="text-[9px] font-bold text-slate-600 uppercase tracking-widest">Withdrawable</span>
+                  <span className="text-[9px] font-bold text-slate-400 font-mono">
+                    ${parseFloat(account?.withdrawable || "0").toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </span>
+                </div>
+                <div className="w-full bg-slate-800 h-1 rounded-full mt-3 overflow-hidden">
+                  <div 
+                    className="bg-cyan-500 h-full transition-all duration-1000" 
+                    style={{ width: `${Math.min(100, (parseFloat(account?.totalMarginUsed || "0") / parseFloat(account?.accountValue || "1")) * 100)}%` }} 
+                  />
+                </div>
               </div>
-              <div className="text-xl font-bold text-white font-mono">$10,482.50</div>
-              <div className="w-full bg-slate-800 h-1 rounded-full mt-3 overflow-hidden">
-                <div className="bg-cyan-500 h-full w-2/3" />
-              </div>
-            </div>
 
             <button 
               onClick={handleKillSwitch}
@@ -463,30 +642,40 @@ export default function App() {
         <div className="absolute inset-0 bg-gradient-to-br from-cyan-500/5 via-transparent to-rose-500/5 pointer-events-none" />
         
         {/* Top Header */}
-        <header className="sticky top-0 z-30 bg-[#050608]/80 backdrop-blur-md border-b border-white/5 px-10 py-6 flex justify-between items-center">
-          <div className="flex items-center gap-6">
+        <header className="sticky top-0 z-30 bg-[#050608]/80 backdrop-blur-md border-b border-white/5 px-4 lg:px-10 py-6 flex flex-col md:flex-row justify-between items-start md:items-center gap-6">
+          <div className="flex items-center gap-6 w-full md:w-auto">
             <div>
-              <h2 className="text-2xl font-black text-white tracking-tight uppercase italic">{activeTab === "dashboard" ? "Dashboard" : activeTab.replace(/([A-Z])/g, ' $1')}</h2>
-              <div className="flex items-center gap-2 text-[10px] font-bold text-slate-500 tracking-widest uppercase">
-                <span className="w-1.5 h-1.5 bg-cyan-500 rounded-full animate-pulse shadow-[0_0_8px_rgba(34,211,238,0.8)]" />
-                Connectivity: Optimal (12ms)
+              <h2 className="text-xl lg:text-2xl font-black text-white tracking-tight uppercase italic">{activeTab === "dashboard" ? "Dashboard" : activeTab.replace(/([A-Z])/g, ' $1')}</h2>
+              <div className="flex items-center gap-4 text-[10px] font-bold text-slate-500 tracking-widest uppercase">
+                <div className="flex items-center gap-1.5">
+                  <span className={`w-1.5 h-1.5 rounded-full ${systemStatus?.websocket?.healthy ? 'bg-cyan-500 animate-pulse' : 'bg-rose-500'} shadow-[0_0_8px_rgba(34,211,238,0.8)]`} />
+                  WS: {systemStatus?.websocket?.healthy ? 'Healthy' : 'Disconnected'}
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className={`w-1.5 h-1.5 rounded-full ${systemStatus?.circuitBreaker?.triggered ? 'bg-rose-500 animate-bounce' : 'bg-emerald-500'} shadow-[0_0_8px_rgba(16,185,129,0.8)]`} />
+                  Safeguard: {systemStatus?.circuitBreaker?.triggered ? 'TRIAGED' : 'ARMED'}
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className={`w-1.5 h-1.5 rounded-full ${systemStatus?.reconciliation?.inProgress ? 'bg-amber-500 animate-spin' : 'bg-slate-700'}`} />
+                  Sync: {systemStatus?.reconciliation?.lastRun ? new Date(systemStatus.reconciliation.lastRun).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : 'Never'}
+                </div>
               </div>
             </div>
             
             <div className="h-8 w-[1px] bg-white/10" />
             
-            <div className="flex gap-4">
+            <div className="hidden sm:flex gap-4">
               <HeaderQuickStat label="Active Streams" value="4" />
               <HeaderQuickStat label="Network Status" value="Healthy" />
             </div>
           </div>
 
-          <div className="flex items-center gap-4">
-             <div className="relative group">
+          <div className="flex flex-wrap items-center gap-4 w-full md:w-auto">
+             <div className="relative group flex-1 md:flex-none">
                <input 
                  type="text" 
                  placeholder="Search assets..." 
-                 className="bg-white/5 border border-white/10 rounded-full px-5 py-2 text-xs w-64 focus:w-80 focus:ring-2 focus:ring-cyan-500/20 outline-none transition-all placeholder:text-slate-600 font-medium"
+                 className="bg-white/5 border border-white/10 rounded-full px-5 py-2 text-xs w-full md:w-64 focus:md:w-80 focus:ring-2 focus:ring-cyan-500/20 outline-none transition-all placeholder:text-slate-600 font-medium"
                />
                <Search size={14} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-600" />
              </div>
@@ -496,51 +685,465 @@ export default function App() {
                <span className="absolute top-2 right-2 w-2 h-2 bg-cyan-500 rounded-full border-2 border-[#050608]" />
              </button>
 
-             <button 
-                onClick={openCreateModal}
-                className="bg-cyan-500 hover:bg-cyan-400 text-black px-6 py-2.5 rounded-xl font-black text-xs tracking-widest flex items-center gap-2 transition-all shadow-[0_4px_20px_rgba(34,211,238,0.2)] hover:scale-105 active:scale-95"
-              >
-                <Plus size={18} />
-                INIT STRATEGY
-              </button>
+             <div className="flex gap-2 w-full md:w-auto">
+               <button 
+                  onClick={openOrderModal}
+                  className="flex-1 md:flex-none bg-white/5 hover:bg-white/10 border border-white/10 text-white px-4 lg:px-6 py-2.5 rounded-xl font-black text-[10px] lg:text-xs tracking-widest flex items-center justify-center gap-2 transition-all"
+                >
+                  <Activity size={16} />
+                  ORDER
+                </button>
+
+               <button 
+                  onClick={openCreateModal}
+                  className="flex-1 md:flex-none bg-cyan-500 hover:bg-cyan-400 text-black px-4 lg:px-6 py-2.5 rounded-xl font-black text-[10px] lg:text-xs tracking-widest flex items-center justify-center gap-2 transition-all shadow-[0_4px_20px_rgba(34,211,238,0.2)]"
+                >
+                  <Plus size={16} />
+                  CREATE
+                </button>
+             </div>
           </div>
         </header>
 
-        <section className="p-10 pb-32 relative z-10">
+        <section className="p-4 lg:p-10 pb-32 relative z-10">
+          {systemStatus?.circuitBreaker?.triggered && (
+            <motion.div 
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: "auto", opacity: 1 }}
+              className="mb-8 p-6 bg-rose-500/10 border border-rose-500/30 rounded-3xl flex items-center justify-between"
+            >
+              <div className="flex items-center gap-4">
+                <div className="w-12 h-12 bg-rose-500 rounded-2xl flex items-center justify-center animate-pulse shadow-[0_0_20px_rgba(244,63,94,0.4)]">
+                  <ShieldAlert className="text-white" />
+                </div>
+                <div>
+                  <h3 className="text-rose-500 font-black tracking-tighter uppercase italic text-lg">System Lockdown Active</h3>
+                  <p className="text-rose-500/60 text-[10px] font-bold uppercase tracking-widest">Drawdown threshold exceeded. All bots halted and orders purged.</p>
+                </div>
+              </div>
+              <button 
+                onClick={handleResetBreaker}
+                className="bg-rose-500 text-white px-6 py-2.5 rounded-xl font-black text-xs tracking-widest uppercase hover:bg-rose-400 transition-all"
+              >
+                Reset Safeguard
+              </button>
+            </motion.div>
+          )}
+
           <div className="fixed top-8 left-1/2 -translate-x-1/2 z-[100] flex flex-col gap-3 pointer-events-none w-full max-w-md">
             <AnimatePresence mode="popLayout">
               {toasts.map((t) => (
                 <motion.div 
                   key={t.id}
-                  initial={{ opacity: 0, y: -40, scale: 0.95 }}
-                  animate={{ opacity: 1, y: 0, scale: 1 }}
-                  exit={{ opacity: 0, y: -20, scale: 0.95 }}
+                  initial={{ opacity: 0, y: -40, filter: "blur(10px)" }}
+                  animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
+                  exit={{ opacity: 0, scale: 0.9, filter: "blur(10px)" }}
                   layout
-                  className={`pointer-events-auto w-full px-6 py-4 rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.5)] border flex items-center gap-4 backdrop-blur-xl ${
+                  className={`pointer-events-auto w-full px-6 py-4 rounded-2xl shadow-[0_30px_70px_rgba(0,0,0,0.7)] border flex items-center gap-5 backdrop-blur-2xl relative overflow-hidden group ${
                     t.type === 'success' ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-100' : 'bg-rose-500/10 border-rose-500/20 text-rose-100'
                   }`}
                 >
-                  {t.type === 'success' ? <Activity size={20} className="text-emerald-400" /> : <AlertTriangle size={20} className="text-rose-400" />}
-                  <div className="flex-1 flex flex-col">
-                     <span className="text-[10px] font-black uppercase tracking-widest leading-none mb-1">{t.type === 'success' ? 'Protocol Success' : 'System Alert'}</span>
-                     <span className="text-xs font-bold opacity-80 leading-tight">{t.message}</span>
+                  <div className={`absolute left-0 top-0 bottom-0 w-1 ${t.type === 'success' ? 'bg-emerald-500' : 'bg-rose-500'}`} />
+                  <div className={`p-2 rounded-lg ${t.type === 'success' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'}`}>
+                    {t.type === 'success' ? <Activity size={18} /> : <AlertTriangle size={18} />}
                   </div>
-                  <button onClick={() => setToasts(prev => prev.filter(item => item.id !== t.id))} className="p-1 hover:bg-white/10 rounded-full transition-colors shrink-0">
-                    <Plus size={16} className="rotate-45" />
+                  <div className="flex-1 flex flex-col">
+                     <span className="text-[10px] font-black uppercase tracking-[0.2em] leading-none mb-1.5 opacity-50">
+                       {t.type === 'success' ? 'Core Execution Logic' : 'System Guard Alert'}
+                     </span>
+                     <span className="text-xs font-black italic tracking-tight leading-tight uppercase group-hover:text-white transition-colors">{t.message}</span>
+                  </div>
+                  <button onClick={() => setToasts(prev => prev.filter(item => item.id !== t.id))} className="p-1 hover:bg-white/10 rounded-full transition-colors shrink-0 text-slate-500">
+                    <X size={16} />
                   </button>
                 </motion.div>
               ))}
             </AnimatePresence>
           </div>
 
+          {activeTab === "markets" && (
+            <div className="bg-[#0A0C10] rounded-3xl border border-white/5 overflow-hidden">
+               <div className="p-8 border-b border-white/5 flex justify-between items-center bg-gradient-to-r from-cyan-500/5 to-transparent">
+                  <div>
+                    <h3 className="text-xs font-black uppercase tracking-[0.3em] text-cyan-500 mb-1">Hyperliquid Global Assets</h3>
+                    <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest leading-none italic">Verified tradeable perpetual pairs in the universe</p>
+                  </div>
+                  <div className="flex gap-4 items-center">
+                     <div className="relative">
+                        <input 
+                          type="text" 
+                          placeholder="Search assets..." 
+                          value={marketSearch}
+                          onChange={(e) => setMarketSearch(e.target.value)}
+                          className="bg-white/5 border border-white/10 rounded-xl px-10 py-2.5 text-xs w-64 focus:w-80 focus:ring-2 focus:ring-cyan-500/20 outline-none transition-all placeholder:text-slate-600 font-medium"
+                        />
+                        <Search size={14} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-600" />
+                     </div>
+                  </div>
+               </div>
+               <div className="overflow-x-auto">
+                 <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr className="bg-black/20 text-[10px] font-black uppercase tracking-[0.2em] text-slate-500 border-b border-white/5">
+                        <th className="px-10 py-6">Instrument</th>
+                        <th className="px-10 py-6 text-right">Mid Price</th>
+                        <th className="px-10 py-6 text-right">24h Change</th>
+                        <th className="px-10 py-6 text-right">Open Interest</th>
+                        <th className="px-10 py-6 text-right">Funding Rate</th>
+                        <th className="px-10 py-6 text-right">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-white/5">
+                      {markets
+                        .filter(m => m.symbol.toLowerCase().includes(marketSearch.toLowerCase()))
+                        .sort((a, b) => {
+                          const oiA = parseFloat(a.openInterest || "0") || 0;
+                          const oiB = parseFloat(b.openInterest || "0") || 0;
+                          return oiB - oiA;
+                        })
+                        .map((market, i) => (
+                        <motion.tr 
+                          initial={{ opacity: 0 }}
+                          animate={{ opacity: 1 }}
+                          key={market.symbol} 
+                          className="hover:bg-white/5 transition-colors group"
+                        >
+                          <td className="px-10 py-6">
+                             <div className="flex items-center gap-4">
+                                <div className="w-10 h-10 rounded-xl bg-white/5 border border-white/10 flex items-center justify-center font-black text-xs text-slate-400 group-hover:text-cyan-400 group-hover:border-cyan-400/20 transition-all font-mono italic">
+                                   {market.symbol.slice(0, 2)}
+                                </div>
+                                <div className="flex flex-col">
+                                   <span className="text-sm font-black text-white italic group-hover:text-cyan-400 transition-colors uppercase tracking-tight">{market.symbol}</span>
+                                   <span className="text-[9px] font-bold text-slate-600 uppercase tracking-widest italic">Hyperliquid Perp</span>
+                                </div>
+                             </div>
+                          </td>
+                          <td className="px-10 py-6 text-right font-mono text-white font-black text-sm">
+                            ${parseFloat(market.price).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          </td>
+                          <td className={`px-10 py-6 text-right font-mono font-black text-xs italic ${(market.dayChange || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                            {(market.dayChange || 0) >= 0 ? '+' : ''}{(market.dayChange || 0).toFixed(2)}%
+                          </td>
+                          <td className="px-10 py-6 text-right font-mono text-slate-400 font-bold text-xs">
+                            ${((parseFloat(market.openInterest || "0") * parseFloat(market.price || "0")) / 1000000).toFixed(1)}M
+                          </td>
+                          <td className={`px-10 py-6 text-right font-mono font-black text-[10px] ${(parseFloat(market.funding || "0") || 0) >= 0 ? 'text-emerald-400/70' : 'text-rose-400/70'}`}>
+                            {((parseFloat(market.funding || "0") || 0) * 100).toFixed(4)}%
+                          </td>
+                          <td className="px-10 py-6 text-right">
+                             <button 
+                               onClick={() => {
+                                 setBotForm(f => ({ ...f, symbol: market.symbol }));
+                                 setIsModalOpen(true);
+                               }}
+                               className="px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-[9px] font-black text-slate-400 hover:bg-cyan-500 hover:text-black hover:border-cyan-500 transition-all uppercase tracking-widest italic"
+                             >
+                               Deploy
+                             </button>
+                          </td>
+                        </motion.tr>
+                      ))}
+                      {markets.length === 0 && (
+                        <tr>
+                          <td colSpan={6} className="px-10 py-32 text-center text-slate-700 italic font-medium uppercase tracking-[0.2em] text-xs">Initialising global asset discovery...</td>
+                        </tr>
+                      )}
+                    </tbody>
+                 </table>
+               </div>
+            </div>
+          )}
+
+          {activeTab === "backtest" && (
+            <div className="grid grid-cols-12 gap-8">
+              <div className="col-span-12 lg:col-span-4 space-y-6">
+                <div className="bg-[#0A0C10] rounded-3xl border border-white/5 p-8">
+                  <h3 className="text-xs font-black uppercase tracking-[0.3em] text-cyan-500 mb-8 font-mono">Simulation Parameters</h3>
+                  
+                  <div className="space-y-6">
+                    <div>
+                      <label className="block text-[10px] font-black text-slate-600 uppercase tracking-widest mb-2">Starting Capital (USD)</label>
+                      <input 
+                        type="number"
+                        value={backtestConfig.startBalance}
+                        onChange={(e) => setBacktestConfig(c => ({ ...c, startBalance: parseFloat(e.target.value) }))}
+                        className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm text-white font-bold outline-none focus:border-cyan-500/30 transition-all font-mono"
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-[10px] font-black text-slate-600 uppercase tracking-widest mb-2">Fee Rate (e.g. 0.0002)</label>
+                        <input 
+                          type="number"
+                          step="0.00001"
+                          value={backtestConfig.feeRate}
+                          onChange={(e) => setBacktestConfig(c => ({ ...c, feeRate: parseFloat(e.target.value) }))}
+                          className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm text-white font-bold outline-none focus:border-cyan-500/30 transition-all font-mono"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-black text-slate-600 uppercase tracking-widest mb-2">Slippage (e.g. 0.0001)</label>
+                        <input 
+                          type="number"
+                          step="0.00001"
+                          value={backtestConfig.slippage}
+                          onChange={(e) => setBacktestConfig(c => ({ ...c, slippage: parseFloat(e.target.value) }))}
+                          className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm text-white font-bold outline-none focus:border-cyan-500/30 transition-all font-mono"
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-[10px] font-black text-slate-600 uppercase tracking-widest mb-2">Simulation Latency (ms)</label>
+                      <input 
+                        type="number"
+                        value={backtestConfig.latencyMs}
+                        onChange={(e) => setBacktestConfig(c => ({ ...c, latencyMs: parseInt(e.target.value) }))}
+                        className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm text-white font-bold outline-none focus:border-cyan-500/30 transition-all font-mono"
+                      />
+                    </div>
+
+                    <div className="pt-4 border-t border-white/5">
+                      <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-4">Target Strategy</h4>
+                      <div className="p-4 bg-cyan-500/5 border border-cyan-500/20 rounded-2xl">
+                         <div className="flex justify-between items-center mb-1">
+                            <span className="text-xs font-black text-white italic">{botForm.strategy} on {botForm.symbol}</span>
+                            <span className="text-[10px] font-black text-cyan-400 uppercase">Selected</span>
+                         </div>
+                         <p className="text-[9px] font-bold text-slate-500 uppercase tracking-widest italic">Uses current configuration in Bot Registry</p>
+                      </div>
+                    </div>
+
+                    <button 
+                      onClick={runBacktest}
+                      disabled={backtestLoading}
+                      className="w-full py-4 bg-cyan-500 hover:bg-cyan-400 text-black rounded-2xl font-black text-xs tracking-widest uppercase transition-all shadow-[0_10px_30px_rgba(34,211,238,0.2)] disabled:opacity-50"
+                    >
+                      {backtestLoading ? <RefreshCcw className="animate-spin mx-auto" /> : "Initiate Simulation Loop"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="col-span-12 lg:col-span-8 space-y-8">
+                {backtestResults && backtestResults.history ? (
+                  <motion.div 
+                    initial={{ opacity: 0, y: 20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="space-y-8"
+                  >
+                    <div className="grid grid-cols-5 gap-4">
+                       <BentoStat label="Net PnL" value={`$${(backtestResults.pnl || 0).toFixed(2)}`} delta={`${(backtestResults.pnlPct || 0).toFixed(2)}%`} icon={<TrendingUp />} color={(backtestResults.pnl || 0) >= 0 ? "text-emerald-400" : "text-rose-400"} />
+                       <BentoStat label="Final Balance" value={`$${(backtestResults.finalEquity || 0).toFixed(2)}`} delta="Post-simulation" icon={<Wallet />} />
+                       <BentoStat label="Total Trades" value={backtestResults.trades || 0} delta="Executions" icon={<Activity />} />
+                       <BentoStat label="Total Fees" value={`$${(backtestResults.totalFees || 0).toFixed(2)}`} delta="Exchange Cost" icon={<Layers />} />
+                       <BentoStat label="Slippage" value={`$${(backtestResults.totalSlippage || 0).toFixed(2)}`} delta="Impact Loss" icon={<RefreshCcw />} />
+                    </div>
+
+                    <div className="bg-[#0A0C10] rounded-3xl border border-white/5 p-8">
+                       <h3 className="text-xs font-black uppercase tracking-[0.3em] text-slate-500 mb-8">Simulation Log</h3>
+                       <div className="space-y-3 max-h-[500px] overflow-y-auto pr-2 custom-scrollbar">
+                          {(backtestResults.history || []).map((order: any, i: number) => (
+                            <div key={i} className="flex justify-between items-center p-4 bg-white/[0.02] border border-white/5 rounded-2xl">
+                               <div className="flex items-center gap-4">
+                                  <span className={`w-2 h-2 rounded-full ${order.isBuy ? 'bg-emerald-500' : 'bg-rose-500'}`} />
+                                  <div>
+                                     <div className="text-xs font-black text-white uppercase italic">{order.isBuy ? 'BUY' : 'SELL'} {order.size} {order.symbol}</div>
+                                     <div className="text-[9px] font-bold text-slate-500 uppercase tracking-widest">Entry: ${order.price} | Fill: ${(order.fillPrice || 0).toFixed(2)}</div>
+                                  </div>
+                               </div>
+                               <div className="text-right">
+                                  <div className="text-[10px] font-black text-white font-mono">Fee: ${(order.fee || 0).toFixed(4)}</div>
+                                  <div className="text-[9px] font-bold text-slate-700 uppercase">{new Date(order.timestamp).toLocaleTimeString()}</div>
+                               </div>
+                            </div>
+                          ))}
+                       </div>
+                    </div>
+                  </motion.div>
+                ) : (
+                  <div className="h-full flex flex-col items-center justify-center py-40 bg-[#0A0C10] rounded-3xl border border-white/5 border-dashed">
+                      <div className="w-16 h-16 bg-white/5 rounded-full flex items-center justify-center mb-6">
+                        <Activity className="text-slate-700" size={32} />
+                      </div>
+                      <h3 className="text-lg font-black text-white italic uppercase tracking-tight mb-2">Awaiting Simulation Task</h3>
+                      <p className="text-xs font-bold text-slate-600 uppercase tracking-widest max-w-xs text-center leading-relaxed">Configure parameters and hit initiate to run a strategy backtest against historical data.</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
           {activeTab === "dashboard" && (
             <div className="space-y-8">
               {/* Bento Stats */}
-              <div className="grid grid-cols-4 gap-6">
-                 <BentoStat label="Realized PnL" value="+$54.20" delta="+12.4% vs 24h" icon={<TrendingUp className="text-emerald-400" />} color="text-emerald-400" />
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 lg:gap-6">
+                 <BentoStat 
+                   label="Portfolio PnL" 
+                   value={`${currentPnl >= 0 ? '+' : ''}$${currentPnl.toFixed(2)}`} 
+                   delta={`${currentPnlPct >= 0 ? '+' : ''}${currentPnlPct.toFixed(2)}% Net Change`} 
+                   icon={<TrendingUp className={currentPnl >= 0 ? "text-emerald-400" : "text-rose-400"} />} 
+                   color={currentPnl >= 0 ? "text-emerald-400" : "text-rose-400"} 
+                 />
                  <BentoStat label="Deployment Load" value={(bots || []).filter(b => b?.status === "RUNNING").length.toString()} delta={`Allocated of ${(bots || []).length}`} icon={<Cpu className="text-cyan-400" />} />
                  <BentoStat label="Asset Exposure" value={(positions || []).length.toString()} delta="Active Markets" icon={<Layers className="text-violet-400" />} />
-                 <BentoStat label="Terminal Vol" value="$12,450" delta="+2.5k today" icon={<Activity className="text-slate-400" />} />
+                 <BentoStat label="Terminal Vol" value={`$${(globalStats?.totalVolume || 0).toLocaleString()}`} delta={`${globalStats?.filledOrders || 0} executions`} icon={<Activity className="text-slate-400" />} />
+              </div>
+
+              {/* Risk Management Command Center */}
+              <div className="bg-[#0A0C10] rounded-3xl border border-white/5 p-6 lg:p-8 relative overflow-hidden group">
+                 <div className="absolute top-0 right-0 p-8 text-rose-500/5 group-hover:text-rose-500/10 transition-colors pointer-events-none">
+                    <ShieldAlert size={160} />
+                 </div>
+                 
+                 <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-10 relative z-10">
+                    <div>
+                       <h3 className="text-xs font-black uppercase tracking-[0.3em] text-slate-500 mb-1">Risk Management Protocol</h3>
+                       <div className="flex items-center gap-2">
+                          <span className={`w-2 h-2 rounded-full ${systemStatus?.circuitBreaker?.triggered ? 'bg-rose-500 animate-pulse' : 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]'}`} />
+                          <span className={`text-[10px] font-black uppercase tracking-widest ${systemStatus?.circuitBreaker?.triggered ? 'text-rose-500' : 'text-emerald-500'}`}>
+                             {systemStatus?.circuitBreaker?.triggered ? 'CIRCUIT BREAKER: TRIGGERED' : 'SYSTEM STATUS: NOMINAL'}
+                          </span>
+                       </div>
+                    </div>
+                    {systemStatus?.circuitBreaker?.triggered && (
+                      <button 
+                        onClick={handleResetBreaker}
+                        className="px-6 py-2 bg-rose-500 hover:bg-rose-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest transition-all shadow-[0_4px_15px_rgba(244,63,94,0.3)]"
+                      >
+                        Reset Safeguard
+                      </button>
+                    )}
+                 </div>
+
+                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4 lg:gap-12 relative z-10">
+                    <div className="col-span-2 md:col-span-1 space-y-2">
+                       <div className="flex justify-between items-end mb-1">
+                          <span className="text-[10px] font-black text-slate-600 uppercase tracking-widest">Total Drawdown</span>
+                          <span className={`text-xs font-black font-mono ${(systemStatus?.circuitBreaker?.currentDrawdown || 0) > (systemStatus?.circuitBreaker?.maxDrawdown || 0.05) * 0.8 ? 'text-rose-500' : 'text-white'}`}>
+                             {((systemStatus?.circuitBreaker?.currentDrawdown || 0) * 100).toFixed(2)}%
+                          </span>
+                       </div>
+                       <div className="w-full bg-white/5 h-2.5 rounded-full overflow-hidden border border-white/5">
+                          <motion.div 
+                            initial={{ width: 0 }}
+                            animate={{ width: `${Math.min(100, ((systemStatus?.circuitBreaker?.currentDrawdown || 0) / (systemStatus?.circuitBreaker?.maxDrawdown || 0.05)) * 100)}%` }}
+                            className={`h-full transition-all duration-1000 ${
+                              (systemStatus?.circuitBreaker?.currentDrawdown || 0) > (systemStatus?.circuitBreaker?.maxDrawdown || 0.05) * 0.7 
+                                ? 'bg-gradient-to-r from-rose-500 to-rose-400' 
+                                : 'bg-gradient-to-r from-cyan-500 to-emerald-400'
+                            }`}
+                          />
+                       </div>
+                       <div className="flex justify-between text-[9px] font-bold text-slate-700 uppercase tracking-tighter">
+                          <span>Initial: ${(systemStatus?.circuitBreaker?.initialEquity || 0).toLocaleString()}</span>
+                          <span>Soft Cap: {((systemStatus?.circuitBreaker?.maxDrawdown || 0.05) * 100).toFixed(1)}%</span>
+                       </div>
+                    </div>
+
+                    <RiskLimitCard 
+                      label="Leverage Cap" 
+                      value={`${systemStatus?.circuitBreaker?.limits?.leverage || 5.0}x`} 
+                      sub="Max Net Leverage" 
+                      icon={<TrendingUp size={16} />} 
+                    />
+                    
+                    <RiskLimitCard 
+                      label="Pos Allocation" 
+                      value={`$${(systemStatus?.circuitBreaker?.limits?.maxPositionSizeUsd || 10000).toLocaleString()}`} 
+                      sub="Per Instrument" 
+                      icon={<Layers size={16} />} 
+                    />
+
+                    <RiskLimitCard 
+                      label="Daily Loss Limit" 
+                      value={`$${(systemStatus?.circuitBreaker?.limits?.dailyLossLimitUsd || 500).toLocaleString()}`} 
+                      sub="Trailing 24h window" 
+                      icon={<ShieldAlert size={16} />} 
+                      isWarning
+                    />
+                 </div>
+              </div>
+
+              {/* HyperLiquid Portfolio Monitor */}
+              <div className="grid grid-cols-12 gap-8">
+                <div className="col-span-12 lg:col-span-4 bg-[#0A0C10] rounded-3xl border border-white/5 p-8 relative overflow-hidden group">
+                  <div className="absolute top-0 left-0 w-full h-[1px] bg-gradient-to-r from-transparent via-cyan-500/20 to-transparent" />
+                  <div className="flex justify-between items-center mb-6">
+                    <h3 className="text-xs font-black uppercase tracking-[0.3em] text-slate-500">Live Equity</h3>
+                    <div className="w-8 h-8 rounded-lg bg-emerald-500/10 flex items-center justify-center">
+                      <Wallet size={16} className="text-emerald-500" />
+                    </div>
+                  </div>
+                  <div className="mb-8 relative z-10">
+                    <div className="text-4xl font-black text-white italic tracking-tighter mb-1 select-all">
+                      ${parseFloat(account?.accountValue || "0").toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </div>
+                    <div className="flex items-center gap-2">
+                       <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest leading-none">HL Balance</span>
+                       <span className="w-1 h-1 bg-emerald-500 rounded-full animate-pulse" />
+                    </div>
+                  </div>
+                  <div className="space-y-4 relative z-10">
+                    <AccountMeta label="Withdrawable" value={`$${parseFloat(account?.withdrawable || "0").toLocaleString(undefined, { minimumFractionDigits: 2 })}`} />
+                    <AccountMeta 
+                      label="Margin Usage" 
+                      value={`${((parseFloat(account?.totalMarginUsed || "0") / parseFloat(account?.accountValue || "1")) * 100).toFixed(1)}%`} 
+                      subValue={`$${parseFloat(account?.totalMarginUsed || "0").toLocaleString(undefined, { minimumFractionDigits: 0 })}`}
+                    />
+                  </div>
+                </div>
+
+                <div className="col-span-12 lg:col-span-8 bg-[#0A0C10] rounded-3xl border border-white/5 p-8 relative overflow-hidden group">
+                  <div className="absolute top-0 right-0 p-8 text-cyan-500/5 group-hover:text-cyan-500/10 transition-colors">
+                    <Activity size={120} />
+                  </div>
+                  <div className="flex justify-between items-center mb-8">
+                    <h3 className="text-xs font-black uppercase tracking-[0.3em] text-slate-500">Capital Performance</h3>
+                    <div className="flex items-center gap-3">
+                       <span className="text-[10px] font-black text-amber-500 uppercase tracking-[0.2em] animate-pulse">Monitoring Risk Exposure</span>
+                       <div className="w-2 h-2 rounded-full bg-emerald-500" />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-12 relative z-10">
+                    <div>
+                       <div className="text-[10px] font-black text-slate-600 uppercase tracking-widest mb-4">Maintenance Margin Used</div>
+                       <div className="text-2xl font-black text-white font-mono mb-2">
+                          ${parseFloat(account?.totalMaintenanceMarginUsed || "0").toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                       </div>
+                       <div className="w-full bg-slate-900 h-2 rounded-full overflow-hidden mb-2">
+                          <div 
+                            className="h-full bg-gradient-to-r from-emerald-500 to-amber-500 transition-all duration-1000" 
+                            style={{ width: `${Math.min(100, (parseFloat(account?.totalMaintenanceMarginUsed || "0") / Math.max(0.1, parseFloat(account?.accountValue || "1"))) * 1000)}%` }} 
+                          />
+                       </div>
+                       <div className="text-[9px] font-bold text-slate-500 italic uppercase">Risk safeguard activates at 80% MM utilization</div>
+                    </div>
+                    
+                    <div className="grid grid-cols-2 gap-4">
+                       <div className="p-4 bg-white/[0.02] border border-white/5 rounded-2xl group/card hover:border-cyan-500/20 transition-all cursor-default">
+                          <div className="text-[9px] font-black text-slate-600 uppercase tracking-widest mb-1 group-hover/card:text-cyan-500 transition-colors">Free Margin</div>
+                          <div className="text-sm font-black text-white font-mono">
+                             ${(parseFloat(account?.accountValue || "0") - parseFloat(account?.totalMarginUsed || "0")).toLocaleString(undefined, { minimumFractionDigits: 0 })}
+                          </div>
+                       </div>
+                       <div className="p-4 bg-white/[0.02] border border-white/5 rounded-2xl group/card hover:border-cyan-500/20 transition-all cursor-default">
+                          <div className="text-[9px] font-black text-slate-600 uppercase tracking-widest mb-1 group-hover/card:text-cyan-500 transition-colors">Safety Multiplier</div>
+                          <div className="text-sm font-black text-white font-mono">{(parseFloat(account?.accountValue || "0") / Math.max(1, parseFloat(account?.totalMarginUsed || "0"))).toFixed(1)}x</div>
+                       </div>
+                       <div className="p-4 bg-white/[0.02] border border-white/5 rounded-2xl col-span-2 flex items-center justify-between">
+                          <div>
+                            <div className="text-[9px] font-black text-slate-600 uppercase tracking-widest mb-1">HL Exchange Sync</div>
+                            <div className="text-[10px] font-black text-cyan-400 font-mono italic">Verified Active</div>
+                          </div>
+                          <RefreshCcw size={14} className="text-cyan-500/20 group-hover:rotate-180 transition-transform duration-500" />
+                       </div>
+                    </div>
+                  </div>
+                </div>
               </div>
 
               {/* Main Visualization Grid */}
@@ -551,15 +1154,32 @@ export default function App() {
                     
                     <div className="flex justify-between items-end mb-10">
                       <div>
+                         <h3 className="text-xs font-black uppercase tracking-[0.3em] text-slate-500 mb-2">Live Market Chart</h3>
+                         <div className="flex items-baseline gap-4">
+                            <h4 className="text-4xl font-black text-white italic tracking-tighter">{selectedAsset} <span className="text-cyan-500/50">/ PERP</span></h4>
+                         </div>
+                      </div>
+                    </div>
+
+                    <div className="h-[500px] w-full mb-12">
+                       <TradingViewChart symbol={selectedAsset} />
+                    </div>
+
+                     <div className="flex justify-between items-end mb-10">
+                      <div>
                          <h3 className="text-xs font-black uppercase tracking-[0.3em] text-slate-500 mb-2">Performance Analytics</h3>
                          <div className="flex items-baseline gap-4">
-                            <h4 className="text-4xl font-black text-white italic">+$542.80</h4>
-                            <span className="text-emerald-400 font-bold text-sm">+2.45%</span>
+                            <h4 className={`text-4xl font-black italic ${currentPnl >= 0 ? 'text-white' : 'text-rose-400'}`}>
+                               {currentPnl >= 0 ? '+' : ''}${currentPnl.toFixed(2)}
+                            </h4>
+                            <span className={currentPnlPct >= 0 ? "text-emerald-400 font-bold text-sm" : "text-rose-400 font-bold text-sm"}>
+                               {currentPnlPct >= 0 ? '+' : ''}{currentPnlPct.toFixed(2)}%
+                            </span>
                          </div>
                       </div>
                       <div className="flex gap-1 p-1.5 bg-black/40 rounded-xl border border-white/5">
-                        <ChartTab label="1D" active={false} />
-                        <ChartTab label="1W" active={true} />
+                        <ChartTab label="1D" active={true} />
+                        <ChartTab label="1W" active={false} />
                         <ChartTab label="1M" active={false} />
                         <ChartTab label="ALL" active={false} />
                       </div>
@@ -567,7 +1187,7 @@ export default function App() {
 
                     <div className="h-[400px] w-full">
                        <ResponsiveContainer width="100%" height="100%">
-                         <AreaChart data={pnlData}>
+                         <AreaChart data={pnlHistory.length > 0 ? pnlHistory : [{ name: 'N/A', pnl: 0 }]}>
                            <defs>
                              <linearGradient id="colorPnl" x1="0" y1="0" x2="0" y2="1">
                                <stop offset="5%" stopColor="#22d3ee" stopOpacity={0.3}/>
@@ -595,17 +1215,19 @@ export default function App() {
                         <div className="text-[10px] text-slate-600 font-bold uppercase tracking-widest">Auto-balancing enabled</div>
                     </div>
                     
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                      {bots.map((bot) => (
-                        <BotCard 
-                          key={bot.id} 
-                          bot={bot} 
-                          orders={orders}
-                          positions={positions}
-                          onStart={() => handleStartBot(bot.id)} 
-                          onStop={() => handleStopBot(bot.id)} 
-                        />
-                      ))}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    {bots.map((bot) => (
+                      <BotCard 
+                        key={bot.id} 
+                        bot={bot} 
+                        orders={orders}
+                        positions={positions}
+                        market={markets.find(m => m.symbol === bot.symbol)}
+                        onStart={() => handleStartBot(bot.id)} 
+                        onStop={() => handleStopBot(bot.id)} 
+                        onSelect={() => setSelectedAsset(bot.symbol)}
+                      />
+                    ))}
                       {bots.length === 0 && (
                         <div className="col-span-2 py-20 text-center border-2 border-dashed border-white/5 rounded-3xl group hover:border-cyan-500/20 transition-colors cursor-pointer" onClick={openCreateModal}>
                            <div className="w-12 h-12 bg-white/5 rounded-full flex items-center justify-center mx-auto mb-4 group-hover:scale-110 transition-transform">
@@ -628,7 +1250,11 @@ export default function App() {
                     
                     <div className="space-y-4">
                         {positions.length > 0 ? positions.map((pos, i) => (
-                          <PositionItem key={i} pos={pos.position} />
+                          <PositionItem 
+                            key={i} 
+                            pos={pos.position} 
+                            onSelect={() => setSelectedAsset(pos.position.coin)}
+                          />
                         )) : (
                           <div className="flex flex-col items-center justify-center pt-20 text-center opacity-20">
                              <Layers size={48} className="mb-4" />
@@ -639,54 +1265,103 @@ export default function App() {
                   </div>
 
                   {/* Market Pulse Feed */}
-                  <div className="bg-[#0A0C10] rounded-3xl border border-white/5 p-8 flex flex-col h-[600px]">
-                     <div className="flex justify-between items-center mb-6">
-                        <h3 className="text-xs font-black uppercase tracking-[0.3em] text-slate-500">Market Pulse</h3>
+                  <div className="bg-[#0A0C10] rounded-3xl border border-white/5 p-8 flex flex-col h-[600px] relative overflow-hidden group">
+                     <div className="absolute top-0 right-0 p-8 text-cyan-500 opacity-5 group-hover:opacity-10 transition-opacity">
+                        <TrendingUp size={120} />
+                     </div>
+
+                     <div className="flex justify-between items-center mb-6 relative z-10">
+                        <div>
+                           <h3 className="text-xs font-black uppercase tracking-[0.3em] text-slate-500 mb-1">Market Pulse</h3>
+                           <div className="flex items-center gap-2">
+                              <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" />
+                              <span className="text-[8px] font-bold text-emerald-500 uppercase tracking-widest">{markets.length} Pairs Live</span>
+                           </div>
+                        </div>
                         <div className="flex gap-2">
-                           <select 
-                             value={marketSort}
-                             onChange={(e) => setMarketSort(e.target.value as any)}
-                             className="bg-white/5 border border-white/10 rounded-lg px-2 py-1 text-[9px] font-black uppercase text-slate-400 outline-none hover:border-cyan-500/30 transition-colors"
-                           >
-                              <option value="volume">Vol</option>
-                              <option value="change">% Chg</option>
-                              <option value="symbol">Name</option>
-                           </select>
+                           <div className="flex p-1 bg-black/40 border border-white/5 rounded-lg">
+                              {["volume", "change", "symbol"].map((s) => (
+                                <button 
+                                  key={s}
+                                  onClick={() => setMarketSort(s as any)}
+                                  className={`px-2 py-1 text-[8px] font-black uppercase tracking-widest rounded-md transition-all ${marketSort === s ? 'bg-cyan-500 text-black' : 'text-slate-500 hover:text-slate-300'}`}
+                                >
+                                  {s.slice(0, 3)}
+                                </button>
+                              ))}
+                           </div>
                         </div>
                      </div>
 
-                     <div className="relative mb-6">
+                     <div className="relative mb-6 z-10">
                         <input 
                           type="text"
-                          placeholder="Filter pairs..."
+                          placeholder="Filter assets..."
                           value={marketSearch}
                           onChange={(e) => setMarketSearch(e.target.value)}
                           className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-[10px] font-bold text-white placeholder:text-slate-700 outline-none focus:border-cyan-500/30 transition-all uppercase tracking-widest"
                         />
                         <Search size={12} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-700" />
                      </div>
-                     
-                     <div className="flex-1 overflow-y-auto custom-scrollbar pr-2 space-y-2">
+
+                     {/* Trending Mini Bar */}
+                     <div className="flex gap-2 mb-6 overflow-x-auto no-scrollbar z-10">
                         {markets
-                          .filter(m => m.symbol.toLowerCase().includes(marketSearch.toLowerCase()))
-                          .sort((a, b) => {
-                            if (marketSort === "volume") return parseFloat(b.volume) - parseFloat(a.volume);
-                            if (marketSort === "change") return b.dayChange - a.dayChange;
-                            return a.symbol.localeCompare(b.symbol);
-                          })
-                          .map((m) => (
-                            <PulseItem 
-                              key={m.symbol}
-                              symbol={m.symbol} 
-                              price={parseFloat(m.price).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} 
-                              change={`${(m.dayChange || 0) >= 0 ? '+' : ''}${(m.dayChange || 0).toFixed(2)}%`} 
-                              up={(m.dayChange || 0) >= 0} 
-                            />
+                          .sort((a, b) => b.dayChange - a.dayChange)
+                          .slice(0, 3)
+                          .map(m => (
+                            <div key={m.symbol} className="shrink-0 px-3 py-1.5 rounded-lg bg-emerald-500/5 border border-emerald-500/10 flex items-center gap-2">
+                               <span className="text-[9px] font-black italic text-emerald-400">{m.symbol}</span>
+                               <span className="text-[8px] font-bold text-emerald-500">
+                                 {(m.dayChange || 0) >= 0 ? '+' : ''}{(m.dayChange || 0).toFixed(1)}%
+                               </span>
+                            </div>
                           ))
                         }
+                     </div>
+                     
+                     <div className="flex-1 overflow-y-auto custom-scrollbar pr-2 space-y-1 z-10">
+                        <AnimatePresence mode="popLayout">
+                          {markets
+                            .filter(m => m.symbol.toLowerCase().includes(marketSearch.toLowerCase()))
+                            .sort((a, b) => {
+                              if (marketSort === "volume") {
+                                const volA = parseFloat(a.volume || "0") || 0;
+                                const volB = parseFloat(b.volume || "0") || 0;
+                                return volB - volA;
+                              }
+                              if (marketSort === "change") return (b.dayChange || 0) - (a.dayChange || 0);
+                              return (a.symbol || "").localeCompare(b.symbol || "");
+                            })
+                            .map((m) => (
+                              <motion.div 
+                                layout
+                                initial={{ opacity: 0, x: -10 }}
+                                animate={{ opacity: 1, x: 0 }}
+                                exit={{ opacity: 0, scale: 0.95 }}
+                                key={m.symbol}
+                              >
+                                <PulseItem 
+                                  symbol={m.symbol} 
+                                  price={parseFloat(m.price).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} 
+                                  change={`${(m.dayChange || 0) >= 0 ? '+' : ''}${(m.dayChange || 0).toFixed(2)}%`} 
+                                  funding={m.funding}
+                                  up={(m.dayChange || 0) >= 0} 
+                                  onSelect={() => setSelectedAsset(m.symbol)}
+                                />
+                              </motion.div>
+                            ))
+                          }
+                        </AnimatePresence>
                         {markets.length === 0 && (
-                          <div className="py-20 text-center opacity-30 italic text-[10px] uppercase tracking-widest font-bold">
-                             Synchronizing feed...
+                          <div className="py-20 text-center flex flex-col items-center gap-4 opacity-30">
+                             <RefreshCcw className="animate-spin text-cyan-500" />
+                             <span className="text-[10px] uppercase tracking-widest font-bold">Synchronizing Global Feed...</span>
+                          </div>
+                        )}
+                        {markets.length > 0 && markets.filter(m => m.symbol.toLowerCase().includes(marketSearch.toLowerCase())).length === 0 && (
+                          <div className="py-10 text-center text-[10px] uppercase tracking-widest font-bold text-slate-700">
+                             No matches found for "{marketSearch}"
                           </div>
                         )}
                      </div>
@@ -698,6 +1373,32 @@ export default function App() {
 
           {activeTab === "strategies" && (
             <div className="space-y-12">
+              <div className="bg-[#0A0C10] rounded-3xl border border-white/5 p-8 relative overflow-hidden group">
+                 <div className="absolute top-0 left-0 w-full h-[1px] bg-gradient-to-r from-transparent via-cyan-500/20 to-transparent" />
+                 <div className="flex justify-between items-center mb-8 relative z-10">
+                    <div>
+                       <h3 className="text-xs font-black uppercase tracking-[0.3em] text-cyan-500 mb-2">Alpha Deployments</h3>
+                       <p className="text-[10px] font-bold text-slate-600 uppercase tracking-widest leading-relaxed">Instantly initialize proven DCA parameters for core assets.</p>
+                    </div>
+                    <div className="flex gap-4">
+                       <button 
+                         onClick={() => initializeQuickBot("BTC")}
+                         className="px-6 py-3 bg-white/5 border border-white/10 rounded-xl text-[10px] font-black text-white hover:bg-cyan-500 hover:text-black hover:border-cyan-500 transition-all uppercase tracking-widest flex items-center gap-2 group/btn"
+                       >
+                         <TrendingUp size={14} className="text-cyan-500 group-hover/btn:text-black transition-colors" />
+                         Quick BTC DCA
+                       </button>
+                       <button 
+                         onClick={() => initializeQuickBot("ETH")}
+                         className="px-6 py-3 bg-white/5 border border-white/10 rounded-xl text-[10px] font-black text-white hover:bg-cyan-500 hover:text-black hover:border-cyan-500 transition-all uppercase tracking-widest flex items-center gap-2 group/btn"
+                       >
+                         <TrendingUp size={14} className="text-cyan-500 group-hover/btn:text-black transition-colors" />
+                         Quick ETH DCA
+                       </button>
+                    </div>
+                 </div>
+              </div>
+
               <div className="grid grid-cols-3 gap-8">
                 {bots.map((bot) => (
                    <BotCard 
@@ -707,6 +1408,7 @@ export default function App() {
                     positions={positions}
                     onStart={() => handleStartBot(bot.id)} 
                     onStop={() => handleStopBot(bot.id)} 
+                    onSelect={() => setSelectedAsset(bot.symbol)}
                   />
                 ))}
                 <div className="border-2 border-dashed border-white/10 rounded-3xl flex flex-col items-center justify-center p-12 hover:border-cyan-500/30 hover:bg-cyan-500/5 transition-all cursor-pointer group" onClick={openCreateModal}>
@@ -796,12 +1498,12 @@ export default function App() {
                         <td className="px-10 py-6 text-right font-mono text-white font-black text-sm">${order.price.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
                         <td className="px-10 py-6 text-right font-mono text-slate-400 font-bold text-xs">{order.size}</td>
                         <td className="px-10 py-6">
-                           <div className="flex items-center gap-2">
-                             <div className={`w-1.5 h-1.5 rounded-full ${order.status === 'FILLED' ? 'bg-emerald-500' : 'bg-amber-500 animate-pulse'}`} />
-                             <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
-                                {order.status === 'FILLED' ? 'SETTLED' : 'PENDING'}
-                             </span>
-                           </div>
+                            <div className="flex items-center gap-2">
+                              <div className={`w-1.5 h-1.5 rounded-full ${['FILLED', 'RECONCILED_CLOSED'].includes(order.status) ? 'bg-emerald-500' : 'bg-amber-500 animate-pulse'}`} />
+                              <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
+                                 {order.status === 'FILLED' || order.status === 'RECONCILED_CLOSED' ? 'SETTLED' : 'PENDING'}
+                              </span>
+                            </div>
                         </td>
                       </motion.tr>
                     ))}
@@ -820,13 +1522,13 @@ export default function App() {
         <AnimatePresence>
           {isModalOpen && (
             <ModalWrapper onClose={() => setIsModalOpen(false)}>
-               <div className="p-10 border-b border-white/5 relative overflow-hidden bg-gradient-to-r from-cyan-500/10 to-transparent">
-                  <h3 className="text-3xl font-black text-white italic mb-1 uppercase tracking-tighter underline decoration-cyan-500/30 underline-offset-8 decoration-4">Deploy Strategy</h3>
-                  <p className="text-slate-400 text-xs font-bold tracking-widest uppercase">Initialize automated intelligence on Hyperliquid HyperEVM.</p>
+               <div className="p-6 lg:p-10 border-b border-white/5 relative overflow-hidden bg-gradient-to-r from-cyan-500/10 to-transparent">
+                  <h3 className="text-2xl lg:text-3xl font-black text-white italic mb-1 uppercase tracking-tighter underline decoration-cyan-500/30 underline-offset-8 decoration-4">Deploy Strategy</h3>
+                  <p className="text-slate-400 text-[10px] lg:text-xs font-bold tracking-widest uppercase">Initialize automated intelligence on Hyperliquid HyperEVM.</p>
                </div>
 
                <form onSubmit={handleCreateBot}>
-                  <div className="p-10 space-y-8 max-h-[60vh] overflow-y-auto custom-scrollbar">
+                  <div className="p-6 lg:p-10 space-y-6 lg:space-y-8 overflow-y-auto custom-scrollbar">
                     {/* Presets Section */}
                     {presets.length > 0 && (
                       <div className="space-y-4">
@@ -859,17 +1561,32 @@ export default function App() {
                       </div>
                     )}
 
-                    <div className="grid grid-cols-2 gap-8">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 lg:gap-8">
                        <FormGroup label="Asset Class">
                           <select 
                             value={botForm.symbol}
-                            onChange={(e) => setBotForm({ ...botForm, symbol: e.target.value })}
-                            className="w-full bg-[#050608] border border-white/10 rounded-xl px-4 py-4 text-sm font-black text-white focus:ring-2 focus:ring-cyan-500/20 outline-none uppercase tracking-widest appearance-none"
+                            onChange={(e) => {
+                              const symbol = e.target.value;
+                              const market = markets.find(m => m.symbol === symbol);
+                              const currentPrice = market ? parseFloat(market.price) : 60000;
+                              
+                              setBotForm({ 
+                                ...botForm, 
+                                symbol,
+                                config: {
+                                  ...botForm.config,
+                                  // Suggest a 10% range around current price
+                                  lowerPrice: Math.round(currentPrice * 0.95),
+                                  upperPrice: Math.round(currentPrice * 1.05)
+                                }
+                              });
+                            }}
+                            className="w-full bg-[#050608] border border-white/10 rounded-xl px-4 py-4 text-sm font-black text-white focus:ring-2 focus:ring-cyan-500/20 outline-none uppercase tracking-widest appearance-none custom-scrollbar"
                           >
-                            <option value="BTC">BTC / PERP</option>
-                            <option value="ETH">ETH / PERP</option>
-                            <option value="SOL">SOL / PERP</option>
-                            <option value="SUI">SUI / PERP</option>
+                            {markets.map(m => (
+                              <option key={m.symbol} value={m.symbol}>{m.symbol} / PERP - ${parseFloat(m.price).toLocaleString()}</option>
+                            ))}
+                            {markets.length === 0 && <option value="BTC">BTC / PERP</option>}
                           </select>
                        </FormGroup>
                        <FormGroup label="Mechanism">
@@ -894,116 +1611,178 @@ export default function App() {
                         />
                     </FormGroup>
 
-                    <div className="pt-8 border-t border-white/5">
+                    <div className="pt-8 border-t border-white/5 bg-black/20 -mx-10 px-10 pb-10">
+                       <div className="flex items-center gap-3 mb-8">
+                          <div className="w-8 h-8 rounded-lg bg-cyan-500/10 flex items-center justify-center text-cyan-400">
+                             <Zap size={16} />
+                          </div>
+                          <div>
+                             <h4 className="text-[10px] font-black text-white uppercase tracking-[0.2em]">{botForm.strategy} Core Configuration</h4>
+                             <p className="text-[9px] text-slate-500 font-bold uppercase tracking-widest italic">Deterministic parameters for the execution engine</p>
+                          </div>
+                       </div>
+
                        {botForm.strategy === "DCA" ? (
-                         <div className="grid grid-cols-2 gap-8">
-                            <FormGroup label="Frequency (Minutes)">
-                               <input 
-                                 type="number"
-                                 value={botForm.config.intervalMinutes}
-                                 onChange={(e) => setBotForm({ ...botForm, config: { ...botForm.config, intervalMinutes: Number(e.target.value) } })}
-                                 className="w-full bg-[#050608] border border-white/10 rounded-xl px-4 py-4 text-sm font-black text-white focus:ring-2 focus:ring-cyan-500/20 outline-none"
-                               />
+                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 lg:gap-8">
+                            <FormGroup label="Execution Frequency">
+                               <div className="relative">
+                                  <input 
+                                    type="number"
+                                    value={botForm.config.intervalMinutes}
+                                    onChange={(e) => setBotForm({ ...botForm, config: { ...botForm.config, intervalMinutes: Number(e.target.value) } })}
+                                    className="w-full bg-[#050608] border border-white/10 rounded-xl px-4 py-4 text-sm font-black text-white focus:ring-2 focus:ring-cyan-500/20 outline-none pr-12"
+                                  />
+                                  <span className="absolute right-4 top-1/2 -translate-y-1/2 text-[9px] font-black text-slate-600 uppercase">Min</span>
+                               </div>
                             </FormGroup>
-                            <FormGroup label="Quantum (USD / EXEC)">
-                               <input 
-                                 type="number"
-                                 value={botForm.config.sizeUsd}
-                                 onChange={(e) => setBotForm({ ...botForm, config: { ...botForm.config, sizeUsd: Number(e.target.value) } })}
-                                 className="w-full bg-[#050608] border border-white/10 rounded-xl px-4 py-4 text-sm font-black text-white focus:ring-2 focus:ring-cyan-500/20 outline-none"
-                               />
+                            <FormGroup label="Quantum Allocation">
+                               <div className="relative">
+                                  <input 
+                                    type="number"
+                                    value={botForm.config.sizeUsd}
+                                    onChange={(e) => setBotForm({ ...botForm, config: { ...botForm.config, sizeUsd: Number(e.target.value) } })}
+                                    className="w-full bg-[#050608] border border-white/10 rounded-xl px-4 py-4 text-sm font-black text-white focus:ring-2 focus:ring-cyan-500/20 outline-none pr-12"
+                                  />
+                                  <span className="absolute right-4 top-1/2 -translate-y-1/2 text-[9px] font-black text-slate-600 uppercase">USD</span>
+                               </div>
                             </FormGroup>
                          </div>
                        ) : (
-                         <div className="space-y-8">
-                            <div className="grid grid-cols-2 gap-8">
-                              <FormGroup label="Price Floor">
-                                 <input 
-                                   type="number"
-                                   value={botForm.config.lowerPrice}
-                                   onChange={(e) => setBotForm({ ...botForm, config: { ...botForm.config, lowerPrice: Number(e.target.value) } })}
-                                   className="w-full bg-[#050608] border border-white/10 rounded-xl px-4 py-4 text-sm font-black text-white focus:ring-2 focus:ring-cyan-500/20 outline-none"
-                                 />
+                         <div className="space-y-6 lg:space-y-8">
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 lg:gap-8">
+                              <FormGroup label="Price Boundary (Floor)">
+                                 <div className="relative">
+                                    <input 
+                                      type="number"
+                                      value={botForm.config.lowerPrice}
+                                      onChange={(e) => setBotForm({ ...botForm, config: { ...botForm.config, lowerPrice: Number(e.target.value) } })}
+                                      className="w-full bg-[#050608] border border-white/10 rounded-xl px-4 py-4 text-sm font-black text-white focus:ring-2 focus:ring-cyan-500/20 outline-none pr-12"
+                                    />
+                                    <span className="absolute right-4 top-1/2 -translate-y-1/2 text-[9px] font-black text-slate-600 uppercase">$</span>
+                                 </div>
                               </FormGroup>
-                              <FormGroup label="Price Ceiling">
-                                 <input 
-                                   type="number"
-                                   value={botForm.config.upperPrice}
-                                   onChange={(e) => setBotForm({ ...botForm, config: { ...botForm.config, upperPrice: Number(e.target.value) } })}
-                                   className="w-full bg-[#050608] border border-white/10 rounded-xl px-4 py-4 text-sm font-black text-white focus:ring-2 focus:ring-cyan-500/20 outline-none"
-                                 />
+                              <FormGroup label="Price Boundary (Ceiling)">
+                                 <div className="relative">
+                                    <input 
+                                      type="number"
+                                      value={botForm.config.upperPrice}
+                                      onChange={(e) => setBotForm({ ...botForm, config: { ...botForm.config, upperPrice: Number(e.target.value) } })}
+                                      className="w-full bg-[#050608] border border-white/10 rounded-xl px-4 py-4 text-sm font-black text-white focus:ring-2 focus:ring-cyan-500/20 outline-none pr-12"
+                                    />
+                                    <span className="absolute right-4 top-1/2 -translate-y-1/2 text-[9px] font-black text-slate-600 uppercase">$</span>
+                                 </div>
                               </FormGroup>
                             </div>
-                            <div className="grid grid-cols-2 gap-8">
-                              <FormGroup label="Resolution (Grid Count)">
-                                 <input 
-                                   type="number"
-                                   value={botForm.config.numGrids}
-                                   onChange={(e) => setBotForm({ ...botForm, config: { ...botForm.config, numGrids: Number(e.target.value) } })}
-                                   className="w-full bg-[#050608] border border-white/10 rounded-xl px-4 py-4 text-sm font-black text-white focus:ring-2 focus:ring-cyan-500/20 outline-none"
-                                 />
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 lg:gap-8">
+                              <FormGroup label="Grid Density">
+                                 <div className="relative">
+                                    <input 
+                                      type="number"
+                                      value={botForm.config.numGrids}
+                                      onChange={(e) => setBotForm({ ...botForm, config: { ...botForm.config, numGrids: Number(e.target.value) } })}
+                                      className="w-full bg-[#050608] border border-white/10 rounded-xl px-4 py-4 text-sm font-black text-white focus:ring-2 focus:ring-cyan-500/20 outline-none pr-12"
+                                    />
+                                    <span className="absolute right-4 top-1/2 -translate-y-1/2 text-[9px] font-black text-slate-600 uppercase">Levels</span>
+                                 </div>
                               </FormGroup>
-                              <FormGroup label="Quantum / Grid (Asset)">
-                                 <input 
-                                   type="number"
-                                   step="0.001"
-                                   value={botForm.config.sizePerGrid}
-                                   onChange={(e) => setBotForm({ ...botForm, config: { ...botForm.config, sizePerGrid: Number(e.target.value) } })}
-                                   className="w-full bg-[#050608] border border-white/10 rounded-xl px-4 py-4 text-sm font-black text-white focus:ring-2 focus:ring-cyan-500/20 outline-none"
-                                 />
+                              <FormGroup label="Quantum Allocation / Level">
+                                 <div className="relative">
+                                    <input 
+                                      type="number"
+                                      step="0.001"
+                                      value={botForm.config.sizePerGrid}
+                                      onChange={(e) => setBotForm({ ...botForm, config: { ...botForm.config, sizePerGrid: Number(e.target.value) } })}
+                                      className="w-full bg-[#050608] border border-white/10 rounded-xl px-4 py-4 text-sm font-black text-white focus:ring-2 focus:ring-cyan-500/20 outline-none pr-12"
+                                    />
+                                    <span className="absolute right-4 top-1/2 -translate-y-1/2 text-[9px] font-black text-slate-600 uppercase">{botForm.symbol}</span>
+                                 </div>
                               </FormGroup>
                             </div>
                          </div>
                        )}
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 lg:gap-8 pt-8 border-t border-white/5">
+                          <FormGroup label="Take Profit (%)">
+                             <input 
+                               type="number"
+                               placeholder="Optional"
+                               value={botForm.config.tp}
+                               onChange={(e) => setBotForm({ ...botForm, config: { ...botForm.config, tp: e.target.value } })}
+                               className="w-full bg-[#050608] border border-white/10 rounded-xl px-4 py-4 text-sm font-black text-emerald-400 focus:ring-2 focus:ring-emerald-500/20 outline-none"
+                             />
+                          </FormGroup>
+                          <FormGroup label="Stop Loss (%)">
+                             <input 
+                               type="number"
+                               placeholder="Optional"
+                               value={botForm.config.sl}
+                               onChange={(e) => setBotForm({ ...botForm, config: { ...botForm.config, sl: e.target.value } })}
+                               className="w-full bg-[#050608] border border-white/10 rounded-xl px-4 py-4 text-sm font-black text-rose-400 focus:ring-2 focus:ring-rose-500/20 outline-none"
+                             />
+                          </FormGroup>
+                       </div>
                     </div>
-                   </div>
 
-                        <div className="grid grid-cols-2 gap-8 pt-8 border-t border-white/5">
-                           <FormGroup label="Take Profit (%)">
-                              <input 
-                                type="number"
-                                placeholder="Optional"
-                                value={botForm.config.tp}
-                                onChange={(e) => setBotForm({ ...botForm, config: { ...botForm.config, tp: e.target.value } })}
-                                className="w-full bg-[#050608] border border-white/10 rounded-xl px-4 py-4 text-sm font-black text-emerald-400 focus:ring-2 focus:ring-emerald-500/20 outline-none"
-                              />
-                           </FormGroup>
-                           <FormGroup label="Stop Loss (%)">
-                              <input 
-                                type="number"
-                                placeholder="Optional"
-                                value={botForm.config.sl}
-                                onChange={(e) => setBotForm({ ...botForm, config: { ...botForm.config, sl: e.target.value } })}
-                                className="w-full bg-[#050608] border border-white/10 rounded-xl px-4 py-4 text-sm font-black text-rose-400 focus:ring-2 focus:ring-rose-500/20 outline-none"
-                              />
-                           </FormGroup>
-                        </div>
-
-                  <div className="p-10 bg-black/40 border-t border-white/5 flex gap-4">
-                    <button 
-                      type="button"
-                      onClick={saveAsPreset}
-                      className="flex-1 px-4 py-4 rounded-xl border border-white/10 text-[10px] font-black text-slate-400 hover:bg-white/5 transition-all uppercase tracking-widest"
-                    >
-                      Store Profile
-                    </button>
-                    <button 
-                      type="submit"
-                      className="flex-[2] bg-cyan-500 hover:bg-cyan-400 text-black px-10 py-4 rounded-xl font-black text-sm tracking-widest shadow-[0_4px_20px_rgba(34,211,238,0.2)]"
-                    >
-                      INITIALIZE DEPLOYMENT
-                    </button>
+                  <div className="p-6 lg:p-10 bg-black/40 border-t border-white/5 space-y-4">
+                    {showPresetNaming ? (
+                      <motion.div 
+                        initial={{ opacity: 0, y: 10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className="flex flex-col gap-3"
+                      >
+                         <label className="text-[10px] font-black text-cyan-400 uppercase tracking-widest">Assign Profile Name</label>
+                         <div className="flex gap-2">
+                            <input 
+                              type="text"
+                              value={presetNameInput}
+                              onChange={(e) => setPresetNameInput(e.target.value)}
+                              placeholder="e.g. Scalp Strategy V1"
+                              className="flex-1 bg-[#050608] border border-cyan-500/30 rounded-xl px-4 py-4 text-sm font-black text-white focus:ring-2 focus:ring-cyan-500/20 outline-none"
+                              autoFocus
+                            />
+                            <button 
+                              onClick={saveAsPreset}
+                              className="bg-cyan-500 text-black px-6 py-4 rounded-xl font-black text-xs uppercase tracking-widest hover:bg-cyan-400 transition-all shadow-[0_0_20px_rgba(34,211,238,0.2)]"
+                            >
+                              Finalize
+                            </button>
+                            <button 
+                              onClick={() => { setShowPresetNaming(false); setPresetNameInput(""); }}
+                              className="px-4 py-4 rounded-xl border border-white/10 text-slate-500 hover:text-white transition-all uppercase text-[10px] font-black"
+                            >
+                              Cancel
+                            </button>
+                         </div>
+                      </motion.div>
+                    ) : (
+                      <div className="flex gap-4">
+                        <button 
+                          type="button"
+                          onClick={() => saveAsPreset()}
+                          className="flex-1 px-4 py-4 rounded-xl border border-white/10 text-[10px] font-black text-slate-400 hover:bg-white/5 transition-all uppercase tracking-widest"
+                        >
+                          Store Profile
+                        </button>
+                        <button 
+                          type="submit"
+                          className="flex-[2] bg-cyan-500 hover:bg-cyan-400 text-black px-10 py-4 rounded-xl font-black text-sm tracking-widest shadow-[0_4px_20px_rgba(34,211,238,0.2)]"
+                        >
+                          INITIALIZE DEPLOYMENT
+                        </button>
+                      </div>
+                    )}
                   </div>
-               </form>
+                </div>
+              </form>
             </ModalWrapper>
           )}
 
           {selectedOrder && (
             <ModalWrapper onClose={() => setSelectedOrder(null)}>
-               <div className="p-10 border-b border-white/5 bg-[#0A0C10]/50 relative">
+               <div className="p-6 lg:p-10 border-b border-white/5 bg-[#0A0C10]/50 relative">
                   <div className="flex justify-between items-start mb-6">
                     <div>
-                       <h3 className="text-3xl font-black text-white italic tracking-tighter uppercase underline decoration-cyan-500/30 underline-offset-8">Exc Review</h3>
+                       <h3 className="text-xl lg:text-3xl font-black text-white italic tracking-tighter uppercase underline decoration-cyan-500/30 underline-offset-8">Exc Review</h3>
                        <p className="text-[10px] font-bold text-slate-500 tracking-[0.2em] mt-2">Validated settlement for operation block {selectedOrder.id.slice(0, 8)}</p>
                     </div>
                     <button onClick={() => setSelectedOrder(null)} className="p-2 hover:bg-white/5 rounded-full transition-colors text-slate-500 hover:text-white">
@@ -1011,7 +1790,7 @@ export default function App() {
                     </button>
                   </div>
                   
-                  <div className="flex gap-3">
+                  <div className="flex flex-wrap gap-3">
                      <span className={`px-3 py-1 rounded text-[10px] font-black italic tracking-widest uppercase ${selectedOrder.side === 'BUY' ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'}`}>
                         {selectedOrder.side} Side
                       </span>
@@ -1019,13 +1798,13 @@ export default function App() {
                   </div>
                </div>
                 
-               <div className="p-10 grid grid-cols-2 gap-10">
-                  <div className="space-y-8">
+               <div className="p-6 lg:p-10 grid grid-cols-1 md:grid-cols-2 gap-6 lg:gap-10">
+                  <div className="space-y-4 lg:space-y-8">
                      <DetailRow label="Hyperliquid OID" value={selectedOrder.hl_order_id || 'LOCAL_PENDING'} />
                      <DetailRow label="Strategic Parent" value={selectedOrder.bot_id} />
                      <DetailRow label="Network Status" value={selectedOrder.status} mono={false} />
                   </div>
-                  <div className="space-y-8 bg-black/20 p-8 rounded-3xl border border-white/5">
+                  <div className="space-y-4 lg:space-y-8 bg-black/20 p-6 lg:p-8 rounded-3xl border border-white/5">
                      <div className="grid grid-cols-1 gap-6">
                         <DetailRow label="Settlement Quote" value={`$${selectedOrder.price.toLocaleString(undefined, { minimumFractionDigits: 4 })}`} color="text-cyan-400" />
                         <DetailRow label="Quantum Size" value={selectedOrder.size} />
@@ -1044,6 +1823,13 @@ export default function App() {
                </div>
             </ModalWrapper>
           )}
+
+          <OrderModal 
+            isOpen={isOrderModalOpen} 
+            onClose={() => setIsOrderModalOpen(false)} 
+            markets={markets} 
+            onSubmit={handleManualOrder} 
+          />
         </AnimatePresence>
       </main>
     </div>
@@ -1089,11 +1875,41 @@ function BentoStat({ label, value, delta, icon, color = "text-white" }: { label:
   );
 }
 
-function BotCard({ bot, orders, positions, onStart, onStop }: { bot: any, orders: any[], positions: any[], onStart: () => Promise<void> | void, onStop: () => Promise<void> | void, key?: any }) {
+function RiskLimitCard({ label, value, sub, icon, isWarning = false }: { label: string, value: string, sub: string, icon: any, isWarning?: boolean }) {
+  return (
+    <div className={`p-5 rounded-2xl border transition-all hover:scale-[1.02] ${isWarning ? 'bg-rose-500/[0.02] border-rose-500/10 hover:border-rose-500/30' : 'bg-white/[0.02] border-white/5 hover:border-cyan-500/20'}`}>
+       <div className="flex justify-between items-start mb-4">
+          <div className="p-2 rounded-lg bg-black/40 border border-white/5 text-slate-500">
+             {icon}
+          </div>
+          {isWarning && <span className="text-[8px] font-black text-rose-500 uppercase tracking-[0.2em] animate-pulse">Critical</span>}
+       </div>
+       <div className="space-y-0.5">
+          <span className="text-[10px] font-black text-slate-600 uppercase tracking-widest leading-none">{label}</span>
+          <div className={`text-xl font-black font-mono italic ${isWarning && value !== '0' ? 'text-rose-500' : 'text-white'}`}>{value}</div>
+          <p className="text-[9px] font-bold text-slate-700 uppercase tracking-widest leading-none mt-1">{sub}</p>
+       </div>
+    </div>
+  );
+}
+
+function BotCard({ bot, orders, positions, market, onStart, onStop, onSelect }: { bot: any, orders: any[], positions: any[], market?: any, onStart: () => Promise<void> | void, onStop: () => Promise<void> | void, onSelect: () => void, key?: any }) {
   const botOrders = orders.filter(o => o.bot_id === bot.id);
   const totalTrades = botOrders.filter(o => o.status === 'FILLED').length;
   
-  const lastOrder = botOrders[0]; // orders are sorted DESC by created_at in server
+  const [tradeFlash, setTradeFlash] = useState(false);
+  const prevTrades = useRef(totalTrades);
+
+  useEffect(() => {
+    if (totalTrades > prevTrades.current) {
+      setTradeFlash(true);
+      const timer = setTimeout(() => setTradeFlash(false), 2000);
+      return () => clearTimeout(timer);
+    }
+    prevTrades.current = totalTrades;
+  }, [totalTrades]);
+  
+  const lastOrder = botOrders[0]; 
   const timeSinceLast = lastOrder ? formatTimeAgo(new Date(lastOrder.created_at).getTime()) : 'No trades';
   
   const position = positions.find(p => p.position.coin === bot.symbol);
@@ -1102,9 +1918,18 @@ function BotCard({ bot, orders, positions, onStart, onStop }: { bot: any, orders
   return (
     <motion.div 
       layout
-      key={bot.id}
-      className="bg-black/30 rounded-2xl border border-white/5 overflow-hidden group hover:border-cyan-500/30 transition-all duration-500"
+      onClick={onSelect}
+      className={`bg-black/30 rounded-2xl border overflow-hidden group transition-all duration-500 relative cursor-pointer ${
+        tradeFlash ? 'border-cyan-400 bg-cyan-500/10 shadow-[0_0_40px_rgba(34,211,238,0.15)] scale-[1.02]' : 'border-white/5 hover:border-cyan-500/30'
+      }`}
     >
+      {tradeFlash && (
+        <motion.div 
+          initial={{ opacity: 0, scale: 0.8 }}
+          animate={{ opacity: 1, scale: 1 }}
+          className="absolute inset-0 pointer-events-none border-2 border-cyan-500/40 rounded-2xl z-10"
+        />
+      )}
       <div className="p-6">
         <div className="flex justify-between items-start mb-6">
           <div className="space-y-1">
@@ -1121,12 +1946,19 @@ function BotCard({ bot, orders, positions, onStart, onStop }: { bot: any, orders
              </div>
              <h4 className="font-black text-lg text-white italic tracking-tight">{bot.name}</h4>
           </div>
-          <div className={`px-2.5 py-1 rounded text-[10px] font-black tracking-tighter border ${
-            bot.status === 'RUNNING' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' :
-            bot.status === 'ERROR' ? 'bg-rose-500/10 text-rose-400 border-rose-500/20' :
+          <div className={`flex items-center gap-2 px-2.5 py-1 rounded text-[10px] font-black tracking-tighter border ${
+            bot.status === 'RUNNING' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20 shadow-[0_0_10px_rgba(16,185,129,0.1)]' :
+            bot.status === 'ERROR' ? 'bg-rose-500/10 text-rose-400 border-rose-500/20 animate-pulse' :
+            bot.status === 'STOPPED' ? 'bg-amber-500/10 text-amber-500/70 border-amber-500/20' :
             'bg-white/5 text-slate-500 border-white/10 opacity-50'
           }`}>
-            {bot.status}
+            <span className={`w-1 h-1 rounded-full ${
+              bot.status === 'RUNNING' ? 'bg-emerald-400 shadow-[0_0_5px_rgba(16,185,129,1)]' :
+              bot.status === 'ERROR' ? 'bg-rose-400' :
+              bot.status === 'STOPPED' ? 'bg-amber-500' :
+              'bg-slate-500'
+            }`} />
+            {bot.status || 'OFFLINE'}
           </div>
         </div>
 
@@ -1136,8 +1968,8 @@ function BotCard({ bot, orders, positions, onStart, onStop }: { bot: any, orders
             <div className="font-black text-white text-xs uppercase italic">{bot.symbol} / PERP</div>
           </div>
           <div className="p-3 bg-white/5 rounded-xl border border-white/5">
-            <div className="text-slate-600 font-bold text-[9px] uppercase tracking-widest mb-1 font-mono">Session PnL</div>
-            <SimulatedPnL isActive={bot.status === 'RUNNING'} />
+            <div className="text-slate-600 font-bold text-[9px] uppercase tracking-widest mb-1 font-mono">Live Price</div>
+            <div className="font-black text-cyan-400 text-xs font-mono">${parseFloat(market?.price || "0").toLocaleString()}</div>
           </div>
         </div>
 
@@ -1157,6 +1989,23 @@ function BotCard({ bot, orders, positions, onStart, onStop }: { bot: any, orders
               <span className="text-[10px] font-black text-slate-500 uppercase tracking-tighter truncate">{timeSinceLast}</span>
            </div>
         </div>
+
+        {(bot.config?.tp || bot.config?.sl) && (
+          <div className="grid grid-cols-2 gap-2 mb-6">
+            {bot.config?.tp && (
+              <div className="px-3 py-1.5 rounded-lg bg-emerald-500/5 border border-emerald-500/10 flex justify-between items-center">
+                <span className="text-[8px] font-black text-emerald-500/50 uppercase tracking-widest">TP</span>
+                <span className="text-[10px] font-black text-emerald-400 font-mono">+{bot.config.tp}%</span>
+              </div>
+            )}
+            {bot.config?.sl && (
+              <div className="px-3 py-1.5 rounded-lg bg-rose-500/5 border border-rose-500/10 flex justify-between items-center">
+                <span className="text-[8px] font-black text-rose-500/50 uppercase tracking-widest">SL</span>
+                <span className="text-[10px] font-black text-rose-400 font-mono">-{bot.config.sl}%</span>
+              </div>
+            )}
+          </div>
+        )}
 
         {bot.status === "RUNNING" ? (
           <button 
@@ -1189,13 +2038,16 @@ function formatTimeAgo(timestamp: number) {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
-function PositionItem({ pos }: { pos: any, key?: any }) {
+function PositionItem({ pos, onSelect }: { pos: any, onSelect: () => void, key?: any }) {
   const size = parseFloat(pos.szi);
   const side = size > 0 ? "LONG" : "SHORT";
   const upnl = parseFloat(pos.unrealizedPnl) || 0;
   
   return (
-    <div className="group relative p-5 bg-white/[0.02] border border-white/5 rounded-2xl flex justify-between items-center hover:border-cyan-500/20 hover:bg-white/[0.04] transition-all duration-300">
+    <div 
+      onClick={onSelect}
+      className="group relative p-5 bg-white/[0.02] border border-white/5 rounded-2xl flex justify-between items-center hover:border-cyan-500/20 hover:bg-white/[0.04] transition-all duration-300 cursor-pointer"
+    >
       <div className="flex items-center gap-4">
         <div className={`w-2 h-10 rounded-full ${size > 0 ? 'bg-emerald-500/40 shadow-[0_0_15px_rgba(16,185,129,0.3)]' : 'bg-rose-500/40 shadow-[0_0_15px_rgba(244,63,94,0.3)]'}`} />
         <div>
@@ -1215,21 +2067,67 @@ function PositionItem({ pos }: { pos: any, key?: any }) {
   );
 }
 
-function PulseItem({ symbol, price, change, up }: { symbol: string, price: string, change: string, up: boolean, key?: any }) {
+function PulseItem({ symbol, price, change, funding, up, onSelect }: { symbol: string, price: string, change: string, funding: string, up: boolean, onSelect: () => void, key?: any }) {
+  const prevPriceRef = useRef(price);
+  const [flash, setFlash] = useState<"up" | "down" | null>(null);
+
+  useEffect(() => {
+    if (!price || !prevPriceRef.current) return;
+    try {
+      const p = parseFloat(price.replace(/,/g, ''));
+      const prevP = parseFloat(prevPriceRef.current.replace(/,/g, ''));
+      
+      if (!isNaN(p) && !isNaN(prevP)) {
+        if (p > prevP) {
+          setFlash("up");
+        } else if (p < prevP) {
+          setFlash("down");
+        }
+      }
+    } catch (e) {
+      console.warn("PulseItem flash calc failed", e);
+    }
+
+    const timer = setTimeout(() => setFlash(null), 1000);
+    prevPriceRef.current = price;
+    return () => clearTimeout(timer);
+  }, [price]);
+
+  const fundingVal = parseFloat(funding || "0") || 0;
+
   return (
-    <div className="flex justify-between items-center py-2 group cursor-default">
+    <div 
+      onClick={onSelect}
+      className={`flex justify-between items-center py-2.5 px-3 rounded-xl border border-transparent hover:bg-white/[0.03] transition-all duration-300 group cursor-pointer ${
+      flash === "up" ? "bg-emerald-500/5" : flash === "down" ? "bg-rose-500/5" : ""
+    }`}>
        <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-lg bg-white/5 border border-white/10 flex items-center justify-center font-black text-[10px] text-slate-400 group-hover:text-cyan-400 group-hover:border-cyan-400/20 transition-all font-mono">
-             {symbol[0]}
+          <div className="w-9 h-9 rounded-xl bg-white/5 border border-white/10 flex items-center justify-center font-black text-[10px] text-slate-400 group-hover:text-cyan-400 group-hover:border-cyan-400/20 transition-all font-mono">
+             {symbol.slice(0, 2)}
           </div>
           <div>
-             <div className="text-xs font-black text-white tracking-widest uppercase">{symbol}</div>
-             <div className="text-[10px] font-bold font-mono text-slate-600 uppercase">Perpetual</div>
+             <div className="text-[11px] font-black text-white tracking-widest uppercase flex items-center gap-1.5">
+               {symbol}
+               <span className="text-[8px] bg-white/5 px-1 rounded text-slate-600">P</span>
+             </div>
+             <div className="flex items-center gap-2">
+               <div className="text-[9px] font-bold font-mono text-slate-600 uppercase tracking-tighter">Perp</div>
+               <div className={`text-[8px] font-black font-mono ${fundingVal >= 0 ? 'text-emerald-500/50' : 'text-rose-500/50'}`}>
+                 {(fundingVal * 100).toFixed(4)}% f
+               </div>
+             </div>
           </div>
        </div>
        <div className="text-right">
-          <div className="text-xs font-black font-mono text-white tracking-tighter animate-pulse-slow">${price}</div>
-          <div className={`text-[10px] font-black ${up ? 'text-emerald-400' : 'text-rose-400'} italic`}>{change}</div>
+          <div className={`text-xs font-black font-mono tracking-tighter transition-colors duration-300 ${
+            flash === "up" ? "text-emerald-400" : flash === "down" ? "text-rose-400" : "text-white"
+          }`}>
+            ${price}
+          </div>
+          <div className={`text-[10px] font-black ${up ? 'text-emerald-400' : 'text-rose-400'} italic flex items-center justify-end gap-1`}>
+            {up ? <TrendingUp size={10} /> : <AlertTriangle size={10} className="rotate-180" />}
+            {change}
+          </div>
        </div>
     </div>
   );
@@ -1237,12 +2135,12 @@ function PulseItem({ symbol, price, change, up }: { symbol: string, price: strin
 
 function ModalWrapper({ children, onClose }: { children: React.ReactNode, onClose: () => void }) {
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center p-6 bg-black/90 backdrop-blur-sm">
+    <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 lg:p-6 bg-black/90 backdrop-blur-sm">
       <motion.div 
         initial={{ opacity: 0, scale: 0.95, y: 20 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
         exit={{ opacity: 0, scale: 0.95, y: 20 }}
-        className="bg-[#0A0C10] border border-white/10 w-full max-w-2xl rounded-[32px] shadow-[0_30px_100px_rgba(0,0,0,0.8)] overflow-hidden relative"
+        className="bg-[#0A0C10] border border-white/10 w-full max-w-2xl rounded-[24px] lg:rounded-[32px] shadow-[0_30px_100px_rgba(0,0,0,0.8)] overflow-hidden relative max-h-[90vh] overflow-y-auto"
       >
         <div className="absolute top-0 left-0 w-full h-[2px] bg-gradient-to-r from-transparent via-cyan-500 to-transparent" />
         {children}
@@ -1282,6 +2180,46 @@ function HeaderQuickStat({ label, value }: { label: string, value: string }) {
   );
 }
 
+function TradingViewChart({ symbol }: { symbol: string }) {
+  const container = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!container.current) return;
+    
+    try {
+      // Clean up
+      container.current.innerHTML = '';
+      
+      const script = document.createElement("script");
+      script.src = "https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js";
+      script.type = "text/javascript";
+      script.async = true;
+      script.innerHTML = JSON.stringify({
+        "autosize": true,
+        "symbol": `COINBASE:${symbol}USD`, // Using Coinbase as reliable fallback for generic UI
+        "interval": "1",
+        "timezone": "Etc/UTC",
+        "theme": "dark",
+        "style": "1",
+        "locale": "en",
+        "enable_publishing": false,
+        "hide_top_toolbar": false,
+        "hide_legend": false,
+        "save_image": false,
+        "container_id": "tradingview_chart",
+        "support_host": "https://www.tradingview.com"
+      });
+      container.current.appendChild(script);
+    } catch (e) {
+      console.error("TradingView widget injection failed", e);
+    }
+  }, [symbol]);
+
+  return (
+    <div className="w-full h-full bg-[#0A0C10] rounded-3xl overflow-hidden border border-white/5 shadow-2xl" ref={container} />
+  );
+}
+
 function ChartTab({ label, active }: { label: string, active: boolean }) {
   return (
     <button className={`px-4 py-1.5 rounded-lg text-[10px] font-black transition-all tracking-widest italic ${active ? 'bg-cyan-500 text-black' : 'text-slate-500 hover:text-slate-300'}`}>
@@ -1304,7 +2242,7 @@ function CustomTooltip({ active, payload, label }: any) {
 }
 
 function SimulatedPnL({ isActive }: { isActive: boolean }) {
-  const [val, setVal] = useState(12.40);
+  const [val, setVal] = useState(() => (Math.random() * 20 - 5));
 
   useEffect(() => {
     if (!isActive) return;
@@ -1322,5 +2260,187 @@ function SimulatedPnL({ isActive }: { isActive: boolean }) {
     >
       { (val || 0) >= 0 ? '+' : ''}${(val || 0).toFixed(2)}
     </motion.div>
+  );
+}
+
+function AccountMeta({ label, value, subValue }: { label: string, value: string, subValue?: string }) {
+  return (
+    <div className="flex justify-between items-center group/meta">
+       <span className="text-[10px] font-black text-slate-600 uppercase tracking-widest group-hover/meta:text-slate-400 transition-colors">{label}</span>
+       <div className="text-right">
+          <div className="text-sm font-black text-white font-mono tracking-tighter">{value}</div>
+          {subValue && <div className="text-[9px] font-bold text-slate-700 uppercase tracking-tighter">{subValue}</div>}
+       </div>
+    </div>
+  );
+}
+
+function OrderModal({ isOpen, onClose, markets, onSubmit }: { isOpen: boolean, onClose: () => void, markets: any[], onSubmit: (data: any) => Promise<void> }) {
+  const [form, setForm] = useState({
+    symbol: "BTC",
+    isBuy: true,
+    price: "",
+    size: "",
+    reduceOnly: false,
+    tp: "",
+    sl: ""
+  });
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    if (isOpen && markets.length > 0 && !form.symbol) {
+      setForm(f => ({ ...f, symbol: markets[0].symbol }));
+    }
+  }, [isOpen, markets]);
+
+  if (!isOpen) return null;
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSubmitting(true);
+    try {
+      await onSubmit(form);
+      onClose();
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+      <motion.div 
+        initial={{ opacity: 0 }} 
+        animate={{ opacity: 1 }} 
+        exit={{ opacity: 0 }}
+        onClick={onClose}
+        className="absolute inset-0 bg-black/80 backdrop-blur-sm" 
+      />
+      
+      <motion.div 
+        initial={{ opacity: 0, scale: 0.95, y: 20 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        exit={{ opacity: 0, scale: 0.95, y: 20 }}
+        className="w-full max-w-lg bg-[#0A0C10] border border-white/10 rounded-3xl overflow-hidden shadow-[0_30px_60px_-15px_rgba(0,0,0,0.7)] relative z-10"
+      >
+        <div className="p-8 border-b border-white/5 flex justify-between items-center">
+            <h2 className="text-xl font-black italic text-white tracking-tight uppercase">Manual Order Execution</h2>
+            <button onClick={onClose} className="text-slate-500 hover:text-white transition-colors">
+              <Plus size={24} className="rotate-45" />
+            </button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="p-8 space-y-6">
+          <div className="grid grid-cols-2 gap-4">
+             <button 
+               type="button"
+               onClick={() => setForm(f => ({ ...f, isBuy: true }))}
+               className={`py-3 rounded-xl font-black text-xs uppercase tracking-widest transition-all ${form.isBuy ? 'bg-emerald-500 text-black' : 'bg-white/5 text-slate-500 hover:bg-white/10'}`}
+             >
+               Buy / Long
+             </button>
+             <button 
+               type="button"
+               onClick={() => setForm(f => ({ ...f, isBuy: false }))}
+               className={`py-3 rounded-xl font-black text-xs uppercase tracking-widest transition-all ${!form.isBuy ? 'bg-rose-500 text-white' : 'bg-white/5 text-slate-500 hover:bg-white/10'}`}
+             >
+               Sell / Short
+             </button>
+          </div>
+
+          <div className="space-y-4">
+             <div>
+                <label className="block text-[10px] font-black text-slate-600 uppercase tracking-widest mb-2">Target Asset</label>
+                <select 
+                  value={form.symbol}
+                  onChange={(e) => {
+                    const price = markets.find(m => m.symbol === e.target.value)?.price || "";
+                    setForm(f => ({ ...f, symbol: e.target.value, price }));
+                  }}
+                  className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm text-white font-bold outline-none focus:border-cyan-500/30 transition-all font-mono"
+                >
+                  <option value="" disabled>Select Asset</option>
+                  {markets.map(m => (
+                    <option key={m.symbol} value={m.symbol}>{m.symbol} - ${parseFloat(m.price).toLocaleString()}</option>
+                  ))}
+                </select>
+             </div>
+
+             <div className="grid grid-cols-2 gap-4">
+                <div>
+                   <label className="block text-[10px] font-black text-slate-600 uppercase tracking-widest mb-2">Order Price (Limit)</label>
+                   <input 
+                     type="number"
+                     step="any"
+                     required
+                     placeholder="0.00"
+                     value={form.price}
+                     onChange={(e) => setForm(f => ({ ...f, price: e.target.value }))}
+                     className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm text-white font-bold outline-none focus:border-cyan-500/30 transition-all font-mono"
+                   />
+                </div>
+                <div>
+                   <label className="block text-[10px] font-black text-slate-600 uppercase tracking-widest mb-2">Size (Units)</label>
+                   <input 
+                     type="number"
+                     step="any"
+                     required
+                     placeholder="1.0"
+                     value={form.size}
+                     onChange={(e) => setForm(f => ({ ...f, size: e.target.value }))}
+                     className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm text-white font-bold outline-none focus:border-cyan-500/30 transition-all font-mono"
+                   />
+                </div>
+             </div>
+
+             <label className="flex items-center gap-3 cursor-pointer group">
+                <input 
+                  type="checkbox"
+                  checked={form.reduceOnly}
+                  onChange={(e) => setForm(f => ({ ...f, reduceOnly: e.target.checked }))}
+                  className="hidden"
+                />
+                <div className={`w-10 h-6 rounded-full transition-all relative ${form.reduceOnly ? 'bg-cyan-500' : 'bg-slate-800'}`}>
+                   <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${form.reduceOnly ? 'left-5' : 'left-1'}`} />
+                </div>
+                <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest group-hover:text-slate-300">Reduce Only</span>
+             </label>
+
+             <div className="grid grid-cols-2 gap-4">
+                <div>
+                   <label className="block text-[10px] font-black text-slate-600 uppercase tracking-widest mb-2">Take Profit (%)</label>
+                   <input 
+                     type="number"
+                     placeholder="Optional"
+                     value={form.tp}
+                     onChange={(e) => setForm(f => ({ ...f, tp: e.target.value }))}
+                     className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm text-emerald-400 font-bold outline-none focus:border-emerald-500/30 transition-all font-mono"
+                   />
+                </div>
+                <div>
+                   <label className="block text-[10px] font-black text-slate-600 uppercase tracking-widest mb-2">Stop Loss (%)</label>
+                   <input 
+                     type="number"
+                     placeholder="Optional"
+                     value={form.sl}
+                     onChange={(e) => setForm(f => ({ ...f, sl: e.target.value }))}
+                     className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm text-rose-400 font-bold outline-none focus:border-rose-500/30 transition-all font-mono"
+                   />
+                </div>
+             </div>
+          </div>
+
+          <button 
+            disabled={submitting}
+            className={`w-full py-4 rounded-xl font-black text-xs uppercase tracking-[0.2em] transition-all flex items-center justify-center gap-2 ${
+              form.isBuy ? 'bg-emerald-500 hover:bg-emerald-400 text-black' : 'bg-rose-500 hover:bg-rose-400 text-white'
+            } disabled:opacity-50 disabled:cursor-not-allowed`}
+          >
+            {submitting ? <RefreshCcw className="animate-spin" size={16} /> : (form.isBuy ? 'Execute Long Order' : 'Execute Short Order')}
+          </button>
+        </form>
+      </motion.div>
+    </div>
   );
 }

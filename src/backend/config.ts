@@ -7,13 +7,8 @@ export const config = {
   dryRun: process.env.DRY_RUN === 'true',
   testnet: process.env.TESTNET === 'true',
   liveTrading: process.env.LIVE_TRADING === 'true',
-  useTopPairsOnly: process.env.USE_TOP_PAIRS_ONLY !== 'false',
-  topTradingPairs: Number(process.env.TOP_TRADING_PAIRS || '5'),
-  signalLookbackDays: Number(process.env.SIGNAL_LOOKBACK_DAYS || '60'),
   dbPath: process.env.DB_PATH || 'trading_bot.db',
-  chainId: process.env.TESTNET === 'true' ? 5 : 1,
-  orderExpirationSeconds: Number(process.env.ORDER_EXPIRATION_SECONDS || '30'),
-
+  
   // API URLs
   infoUrl: process.env.TESTNET === 'true' 
     ? 'https://api.hyperliquid-testnet.xyz/info' 
@@ -22,6 +17,15 @@ export const config = {
     ? 'https://api.hyperliquid-testnet.xyz/exchange' 
     : 'https://api.hyperliquid.xyz/exchange',
     
-  // Default symbols
-  supportedSymbols: ['BTC', 'ETH', 'SOL', 'SUI'],
+  // Supported symbols (Initial set)
+  supportedSymbols: ['BTC', 'ETH', 'SOL', 'HYPE', 'SUI'],
+
+  // Market Selection configuration
+  marketSelectionEnabled: process.env.MARKET_SELECTION_ENABLED === 'true' || false,
+  marketSelectionIntervalMs: parseInt(process.env.MARKET_SELECTION_INTERVAL_MINUTES || '60') * 60 * 1000,
+  maxSelectedMarkets: parseInt(process.env.MAX_SELECTED_MARKETS || '5'),
+  min24hVolumeUsd: parseFloat(process.env.MIN_24H_VOLUME_USD || '50000000'),
+  maxSpreadPercent: parseFloat(process.env.MAX_SPREAD_PERCENT || '0.05') / 100, // percentage to decimal
+  maxAbsFundingRate: parseFloat(process.env.MAX_ABS_FUNDING_RATE || '0.0003'),
+  marketLookbackDays: parseInt(process.env.MARKET_LOOKBACK_DAYS || '60'),
 };
