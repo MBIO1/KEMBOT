@@ -7,8 +7,10 @@ export const config = {
   dryRun: process.env.DRY_RUN === 'true',
   testnet: process.env.TESTNET === 'true',
   liveTrading: process.env.LIVE_TRADING === 'true',
-  dbPath: 'trading_bot.db',
-  
+  dbPath: process.env.DB_PATH || 'trading_bot.db',
+  chainId: process.env.TESTNET === 'true' ? 5 : 1,
+  orderExpirationSeconds: Number(process.env.ORDER_EXPIRATION_SECONDS || '30'),
+
   // API URLs
   infoUrl: process.env.TESTNET === 'true' 
     ? 'https://api.hyperliquid-testnet.xyz/info' 

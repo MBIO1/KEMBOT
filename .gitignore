@@ -6,3 +6,4 @@ coverage/
 *.log
 .env*
 !.env.example
+trading_bot.db
