@@ -1,8 +1,26 @@
 import { privateKeyToAccount } from 'viem/accounts';
-import { recoverTypedDataAddress } from 'viem';
 import axios from 'axios';
-import type { TypedData } from 'viem';
+import { signL1Action } from '@nktkas/hyperliquid/signing';
 import { config as appConfig } from '../config.ts';
+
+/** Matches Hyperliquid Python SDK `float_to_wire` (wire-format price/size strings). */
+export function floatToWire(x: number): string {
+  const rounded = x.toFixed(8);
+  if (Math.abs(Number(rounded) - x) >= 1e-12) {
+    throw new Error(`float_to_wire causes rounding: ${x}`);
+  }
+  let s = rounded;
+  if (s === '-0.00000000') s = '0.00000000';
+  if (!s.includes('.')) return s;
+  const neg = s.startsWith('-');
+  const abs = neg ? s.slice(1) : s;
+  const [intPart, decRaw] = abs.split('.');
+  const decTrim = decRaw.replace(/0+$/, '');
+  const body = decTrim.length > 0 ? `${intPart}.${decTrim}` : intPart;
+  return neg ? `-${body}` : body;
+}
+
+export type HyperliquidTif = 'Alo' | 'Ioc' | 'Gtc';
 
 export interface HyperliquidOrder {
   symbol: string;
@@ -10,25 +28,25 @@ export interface HyperliquidOrder {
   price: number;
   size: number;
   reduceOnly: boolean;
-  nonce?: bigint;
-  deadline?: number;
+  /** Limit time-in-force; defaults to Ioc (aggressive) for reduce-only closes, Gtc otherwise. */
+  tif?: HyperliquidTif;
 }
 
 export class HyperliquidClient {
-  private account: any;
+  private account: ReturnType<typeof privateKeyToAccount> | undefined;
   private walletAddress: string | undefined;
-  private chainId: number;
+  private perpAssetIndex: Map<string, number> | null = null;
 
   constructor() {
-    this.chainId = appConfig.chainId;
-
     if (appConfig.privateKey) {
       const key = appConfig.privateKey.startsWith('0x') ? appConfig.privateKey : `0x${appConfig.privateKey}`;
       this.account = privateKeyToAccount(key as `0x${string}`);
-      this.walletAddress = this.account.address;
+      this.walletAddress = this.account.address.toLowerCase();
       console.log(`Initialized client for address: ${this.walletAddress}`);
     } else {
-      this.walletAddress = appConfig.walletAddress;
+      this.walletAddress = appConfig.walletAddress
+        ? appConfig.walletAddress.toLowerCase()
+        : undefined;
       if (this.walletAddress) {
         console.log(`Initialized in partial mode (info only) for address: ${this.walletAddress}`);
       } else {
@@ -41,20 +59,31 @@ export class HyperliquidClient {
     return this.walletAddress;
   }
 
-  async getInfo(action: any) {
+  /** Viem local account used as Hyperliquid `AbstractWallet` for L1 signing. */
+  public getSigningWallet() {
+    return this.account;
+  }
+
+  private vaultAddressHex(): `0x${string}` | undefined {
+    const v = appConfig.vaultAddress?.trim();
+    if (!v) return undefined;
+    const hex = (v.startsWith('0x') ? v : `0x${v}`) as `0x${string}`;
+    return hex.toLowerCase() as `0x${string}`;
+  }
+
+  async getInfo(action: Record<string, unknown>) {
     try {
       const response = await axios.post(appConfig.infoUrl, action, {
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         timeout: 10000,
       });
       return response.data;
-    } catch (error: any) {
-      if (error.response) {
-        console.error('HL Info Error Details:', error.response.data);
+    } catch (error: unknown) {
+      const err = error as { response?: { data?: unknown }; message?: string };
+      if (err.response) {
+        console.error('HL Info Error Details:', err.response.data);
       }
-      console.error('HL Info Error:', error.message);
+      console.error('HL Info Error:', err.message);
       throw error;
     }
   }
@@ -65,6 +94,27 @@ export class HyperliquidClient {
 
   async getMetaAndAssetCtxs() {
     return this.getInfo({ type: 'metaAndAssetCtxs' });
+  }
+
+  /** Perpetual asset index in `meta.universe` (required for exchange order/cancel wire fields). */
+  async resolvePerpAssetIndex(coin: string): Promise<number> {
+    if (this.perpAssetIndex?.has(coin)) {
+      return this.perpAssetIndex.get(coin)!;
+    }
+    const meta = await this.getMeta();
+    const universe = Array.isArray(meta?.universe) ? meta.universe : [];
+    const map = new Map<string, number>();
+    universe.forEach((asset: { name?: string }, index: number) => {
+      if (typeof asset?.name === 'string') {
+        map.set(asset.name, index);
+      }
+    });
+    this.perpAssetIndex = map;
+    const idx = map.get(coin);
+    if (idx === undefined) {
+      throw new Error(`Unknown perp coin "${coin}" — not found in meta.universe`);
+    }
+    return idx;
   }
 
   async getAccountState() {
@@ -79,7 +129,7 @@ export class HyperliquidClient {
     if (!this.walletAddress) {
       return [];
     }
-    return this.getInfo({ type: 'orders', user: this.walletAddress });
+    return this.getInfo({ type: 'openOrders', user: this.walletAddress });
   }
 
   async getMarketPrice(symbol: string) {
@@ -96,99 +146,84 @@ export class HyperliquidClient {
     }
   }
 
+  /**
+   * Recent candles via official `candleSnapshot` info request.
+   * @see https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint
+   */
   async getTradingHistory(symbol: string, days: number) {
-    const types = ['priceHistory', 'ohlc', 'candles', 'history', 'tradeHistory'];
-    for (const type of types) {
-      try {
-        const data = await this.getInfo({ type, symbol, days });
-        if (Array.isArray(data) && data.length > 0) {
-          return data;
-        }
-      } catch (error) {
-        // Try next available history endpoint.
+    const endTime = Date.now();
+    const startTime = endTime - Math.max(1, days) * 24 * 60 * 60 * 1000;
+    try {
+      const data = await this.getInfo({
+        type: 'candleSnapshot',
+        req: {
+          coin: symbol,
+          interval: '1h',
+          startTime,
+          endTime,
+        },
+      });
+      if (Array.isArray(data) && data.length > 0) {
+        return data;
       }
+    } catch (error) {
+      console.error(`candleSnapshot failed for ${symbol}:`, error);
     }
     return [];
   }
 
-  public getOrderTypedData(order: HyperliquidOrder): TypedData {
-    if (!this.walletAddress) {
-      throw new Error('Wallet address required to build order payload');
-    }
-
-    const deadline = order.deadline || Math.floor(Date.now() / 1000) + appConfig.orderExpirationSeconds;
-    const nonce = order.nonce ?? BigInt(Date.now());
-
-    return {
-      types: {
-        EIP712Domain: [
-          { name: 'name', type: 'string' },
-          { name: 'version', type: 'string' },
-          { name: 'chainId', type: 'uint256' },
-        ],
-        Order: [
-          { name: 'user', type: 'address' },
-          { name: 'symbol', type: 'string' },
-          { name: 'side', type: 'string' },
-          { name: 'price', type: 'string' },
-          { name: 'size', type: 'string' },
-          { name: 'reduceOnly', type: 'bool' },
-          { name: 'nonce', type: 'uint256' },
-          { name: 'deadline', type: 'uint256' },
-          { name: 'testnet', type: 'bool' },
-        ],
-      },
-      domain: {
-        name: 'Hyperliquid',
-        version: '1',
-        chainId: this.chainId,
-      },
-      primaryType: 'Order',
-      message: {
-        user: this.walletAddress,
-        symbol: order.symbol,
-        side: order.isBuy ? 'BUY' : 'SELL',
-        price: order.price.toString(),
-        size: order.size.toString(),
-        reduceOnly: order.reduceOnly,
-        nonce: nonce.toString(),
-        deadline,
-        testnet: appConfig.testnet,
-      },
-    };
+  private defaultTif(order: HyperliquidOrder): HyperliquidTif {
+    /** Ioc matches typical bot behavior (cross at limit); set `tif: 'Gtc'` to rest on the book. */
+    return order.tif ?? 'Ioc';
   }
 
-  public async signOrder(order: HyperliquidOrder) {
+  private async postExchange(action: Record<string, unknown>, nonce: number) {
     if (!this.account) {
-      throw new Error('Private key is required to sign orders. Set HYPERLIQUID_PRIVATE_KEY.');
+      throw new Error('Private key is required to sign exchange actions. Set HYPERLIQUID_PRIVATE_KEY.');
     }
 
-    if (!order.nonce) {
-      order.nonce = BigInt(Date.now());
-    }
-    if (!order.deadline) {
-      order.deadline = Math.floor(Date.now() / 1000) + appConfig.orderExpirationSeconds;
-    }
-
-    const typedData = this.getOrderTypedData(order);
-    return await this.account.signTypedData(typedData);
-  }
-
-  public async verifyOrderSignature(order: HyperliquidOrder, signature: string) {
-    const typedData = this.getOrderTypedData(order);
-    return recoverTypedDataAddress({
-      domain: typedData.domain,
-      message: typedData.message,
-      primaryType: typedData.primaryType,
-      types: typedData.types,
-      signature,
+    const signature = await signL1Action({
+      wallet: this.account,
+      action,
+      nonce,
+      isTestnet: appConfig.testnet,
+      vaultAddress: this.vaultAddressHex(),
+      expiresAfter: appConfig.expiresAfterMs,
     });
+
+    const body: Record<string, unknown> = {
+      action,
+      nonce,
+      signature,
+    };
+    const vault = this.vaultAddressHex();
+    if (vault && action.type !== 'usdClassTransfer' && action.type !== 'sendAsset') {
+      body.vaultAddress = vault;
+    }
+    if (appConfig.expiresAfterMs !== undefined) {
+      body.expiresAfter = appConfig.expiresAfterMs;
+    }
+
+    try {
+      const response = await axios.post(appConfig.exchangeUrl, body, {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 20000,
+      });
+      return response.data;
+    } catch (error: unknown) {
+      const err = error as { response?: { data?: unknown }; message?: string };
+      if (err.response) {
+        console.error('HL Exchange Error Details:', err.response.data);
+      }
+      console.error('HL Exchange Error:', err.message);
+      throw error;
+    }
   }
 
   async placeOrder(order: HyperliquidOrder) {
     if (appConfig.dryRun) {
       console.log(`[DRY RUN] Placing ${order.isBuy ? 'BUY' : 'SELL'} ${order.symbol} ${order.size} @ ${order.price}`);
-      return { status: 'ok', orderId: `dry-${Math.random().toString(36).substring(7)}` };
+      return { status: 'ok', response: { type: 'order', data: { statuses: [{ resting: { oid: 0 } }] } } };
     }
 
     if (!appConfig.liveTrading) {
@@ -199,41 +234,33 @@ export class HyperliquidClient {
       throw new Error('Private key and wallet address are required for live trading.');
     }
 
-    const signature = await this.signOrder(order);
-    const payload = {
-      type: 'placeOrder',
-      order: {
-        user: this.walletAddress,
-        symbol: order.symbol,
-        side: order.isBuy ? 'BUY' : 'SELL',
-        price: order.price.toString(),
-        size: order.size.toString(),
-        reduceOnly: order.reduceOnly,
-        nonce: BigInt(Date.now()).toString(),
-        deadline: Math.floor(Date.now() / 1000) + appConfig.orderExpirationSeconds,
-      },
-      signature,
+    const nonce = Date.now();
+    const asset = await this.resolvePerpAssetIndex(order.symbol);
+    const tif = this.defaultTif(order);
+
+    const orderWire = {
+      a: asset,
+      b: order.isBuy,
+      p: floatToWire(order.price),
+      s: floatToWire(order.size),
+      r: order.reduceOnly,
+      t: { limit: { tif } },
     };
 
-    try {
-      const response = await axios.post(appConfig.exchangeUrl, payload, {
-        headers: { 'Content-Type': 'application/json' },
-        timeout: 20000,
-      });
-      return response.data;
-    } catch (error: any) {
-      if (error.response) {
-        console.error('HL Exchange Error Details:', error.response.data);
-      }
-      console.error('HL Exchange Error:', error.message);
-      throw error;
-    }
+    const action = {
+      type: 'order',
+      orders: [orderWire],
+      grouping: 'na',
+    };
+
+    return this.postExchange(action, nonce);
   }
 
-  async cancelOrder(orderId: string) {
+  /** Cancel a single resting order (asset index + oid per Hyperliquid exchange API). */
+  async cancelOrder(coin: string, oid: number) {
     if (appConfig.dryRun) {
-      console.log(`[DRY RUN] Cancelling order ${orderId}`);
-      return { status: 'ok' };
+      console.log(`[DRY RUN] Cancelling order ${coin} oid=${oid}`);
+      return { status: 'ok', response: { type: 'cancel', data: { statuses: ['success'] } } };
     }
 
     if (!appConfig.liveTrading) {
@@ -244,61 +271,85 @@ export class HyperliquidClient {
       throw new Error('Private key and wallet address are required for live trading.');
     }
 
-    const payload = {
-      type: 'cancelOrder',
-      orderId,
-      user: this.walletAddress,
-      timestamp: Math.floor(Date.now() / 1000),
+    const asset = await this.resolvePerpAssetIndex(coin);
+    const nonce = Date.now();
+    const action = {
+      type: 'cancel',
+      cancels: [{ a: asset, o: oid }],
     };
 
-    const signature = await this.account.signMessage(JSON.stringify(payload));
-
-    try {
-      const response = await axios.post(appConfig.exchangeUrl, { ...payload, signature }, {
-        headers: { 'Content-Type': 'application/json' },
-        timeout: 20000,
-      });
-      return response.data;
-    } catch (error: any) {
-      if (error.response) {
-        console.error('HL Cancel Error Details:', error.response.data);
-      }
-      console.error('HL Cancel Error:', error.message);
-      throw error;
-    }
+    return this.postExchange(action, nonce);
   }
 
   async cancelOpenOrders() {
     const openOrders = await this.getOpenOrders();
-    if (!Array.isArray(openOrders)) {
+    if (!Array.isArray(openOrders) || openOrders.length === 0) {
       return [];
     }
 
-    return Promise.all(openOrders.map((order: any) => this.cancelOrder(order.id || order.oid || order.orderId)));
+    if (appConfig.dryRun) {
+      console.log(`[DRY RUN] Cancelling ${openOrders.length} open orders`);
+      return [{ status: 'ok' }];
+    }
+
+    if (!appConfig.liveTrading) {
+      throw new Error('Live trading is disabled. Set LIVE_TRADING=true to cancel real orders.');
+    }
+
+    if (!this.account || !this.walletAddress) {
+      throw new Error('Private key and wallet address are required for live trading.');
+    }
+
+    const cancels = await Promise.all(
+      openOrders.map(async (row: { coin: string; oid: number }) => ({
+        a: await this.resolvePerpAssetIndex(row.coin),
+        o: row.oid,
+      })),
+    );
+
+    const nonce = Date.now();
+    const action = { type: 'cancel', cancels };
+    const result = await this.postExchange(action, nonce);
+    return [result];
   }
 
   async closeAllPositions() {
     const state = await this.getAccountState();
     const positions = state.assetPositions || [];
 
-    return Promise.all(positions.map(async (position: any) => {
-      const size = Math.abs(parseFloat(position.position.szi) || 0);
-      if (size === 0) return null;
+    return Promise.all(
+      positions.map(async (position: { position: { szi: string; coin: string } }) => {
+        const size = Math.abs(parseFloat(position.position.szi) || 0);
+        if (size === 0) return null;
 
-      const isBuy = parseFloat(position.position.szi) < 0;
-      const price = await this.getMarketPrice(position.position.coin);
+        const isBuy = parseFloat(position.position.szi) < 0;
+        const price = await this.getMarketPrice(position.position.coin);
 
-      return this.placeOrder({
-        symbol: position.position.coin,
-        isBuy,
-        price,
-        size,
-        reduceOnly: true,
-      });
-    }));
+        return this.placeOrder({
+          symbol: position.position.coin,
+          isBuy,
+          price,
+          size,
+          reduceOnly: true,
+          tif: 'Ioc',
+        });
+      }),
+    );
   }
 
-  getAccountEquity(state: any) {
-    return parseFloat(state.collateralEquity || state.totalAccountValue || state.equity || '0') || 0;
+  getAccountEquity(state: {
+    marginSummary?: { accountValue?: string };
+    crossMarginSummary?: { accountValue?: string };
+    collateralEquity?: string;
+    totalAccountValue?: string;
+    equity?: string;
+  }) {
+    const fromMargin =
+      parseFloat(state.marginSummary?.accountValue || '') ||
+      parseFloat(state.crossMarginSummary?.accountValue || '');
+    if (fromMargin > 0) return fromMargin;
+    return (
+      parseFloat(state.collateralEquity || state.totalAccountValue || state.equity || '0') || 0
+    );
   }
 }

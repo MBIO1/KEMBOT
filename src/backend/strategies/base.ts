@@ -27,7 +27,9 @@ export abstract class BaseStrategy {
   abstract tick(): Promise<void>;
 
   protected async getOpenOrderCount() {
-    const row = db.prepare('SELECT COUNT(*) as count FROM orders WHERE bot_id = ? AND status = ?').get(this.id, 'NEW');
+    const row = db.prepare('SELECT COUNT(*) as count FROM orders WHERE bot_id = ? AND status = ?').get(this.id, 'NEW') as
+      | { count?: number }
+      | undefined;
     return (row?.count || 0) as number;
   }
 

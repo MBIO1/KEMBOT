@@ -59,6 +59,15 @@ export default function App() {
   const [toasts, setToasts] = useState<any[]>([]);
   const prevBots = useRef<any[]>([]);
   const prevOrders = useRef<any[]>([]);
+  const [hyperSystem, setHyperSystem] = useState<{
+    wsConnected?: boolean;
+    trackedSymbols?: string[];
+    lastMidsUpdatedAt?: number;
+    rows?: any[];
+    tradingEnabled?: boolean;
+    config?: Record<string, unknown>;
+    recentActions?: { t: number; message: string }[];
+  } | null>(null);
 
   const addToast = (message: string, type: 'success' | 'error' = 'success') => {
     const id = Date.now() + Math.random();
@@ -139,11 +148,9 @@ export default function App() {
         setMarkets(prev => {
           // Create a lookup for current prices to preserve WS updates
           const priceMap = new Map(prev.map(m => [m.symbol, m.price]));
-          return marketRes.map(m => ({
+          return marketRes.map((m: any) => ({
             ...m,
-            // Prefer the current price in state if it exists (likely from WS)
-            // but for the first load, use the polled price.
-            price: priceMap.get(m.symbol) || m.price
+            price: m.price ?? priceMap.get(m.symbol),
           }));
         });
       }
@@ -159,8 +166,27 @@ export default function App() {
     const savedPresets = localStorage.getItem("hyperquant_presets");
     if (savedPresets) setPresets(JSON.parse(savedPresets));
     fetchData();
-    const interval = setInterval(fetchData, 5000);
+    const interval = setInterval(fetchData, 30000);
     return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadHyper = async () => {
+      try {
+        const r = await fetch("/api/hyper-system");
+        if (!r.ok || cancelled) return;
+        setHyperSystem(await r.json());
+      } catch {
+        /* ignore */
+      }
+    };
+    loadHyper();
+    const id = setInterval(loadHyper, 4000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
   }, []);
 
   useEffect(() => {
@@ -542,6 +568,73 @@ export default function App() {
                  <BentoStat label="Asset Exposure" value={(positions || []).length.toString()} delta="Active Markets" icon={<Layers className="text-violet-400" />} />
                  <BentoStat label="Terminal Vol" value="$12,450" delta="+2.5k today" icon={<Activity className="text-slate-400" />} />
               </div>
+
+              {hyperSystem && (
+                <div className="bg-[#0A0C10] rounded-3xl border border-white/5 p-6">
+                  <div className="flex flex-wrap justify-between items-start gap-4 mb-4">
+                    <div>
+                      <h3 className="text-xs font-black uppercase tracking-[0.3em] text-slate-500 mb-1">Hyper System</h3>
+                      <p className="text-[10px] text-slate-600 font-bold uppercase tracking-widest">
+                        Top {String(hyperSystem.config?.topTradingPairs ?? "—")} volume pairs · server WS + REST trend cache
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap gap-3 text-[10px] font-black uppercase tracking-widest">
+                      <span className={hyperSystem.wsConnected ? "text-emerald-400" : "text-rose-400"}>
+                        HL WS {hyperSystem.wsConnected ? "live" : "down"}
+                      </span>
+                      <span className={hyperSystem.tradingEnabled ? "text-amber-400" : "text-slate-500"}>
+                        Auto trade {hyperSystem.tradingEnabled ? "armed" : "off"}
+                      </span>
+                      {hyperSystem.lastMidsUpdatedAt ? (
+                        <span className="text-slate-500">
+                          mids {Math.max(0, Math.round((Date.now() - hyperSystem.lastMidsUpdatedAt) / 1000))}s ago
+                        </span>
+                      ) : null}
+                    </div>
+                  </div>
+                  <div className="overflow-x-auto max-h-56 overflow-y-auto rounded-xl border border-white/5">
+                    <table className="w-full text-left text-[10px]">
+                      <thead className="sticky top-0 bg-[#0A0C10] text-slate-500 uppercase tracking-widest font-black border-b border-white/5">
+                        <tr>
+                          <th className="p-2">Pair</th>
+                          <th className="p-2">Mid</th>
+                          <th className="p-2">Trend</th>
+                          <th className="p-2">Mom%</th>
+                          <th className="p-2">Sig</th>
+                          <th className="p-2">Strong</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(hyperSystem.rows || []).map((row: any) => (
+                          <tr key={row.symbol} className="border-b border-white/5 hover:bg-white/[0.02]">
+                            <td className="p-2 font-bold text-white">{row.symbol}</td>
+                            <td className="p-2 text-slate-300">{row.mid != null ? Number(row.mid).toFixed(4) : "—"}</td>
+                            <td className="p-2 text-slate-400">{row.trendScore?.toFixed?.(2) ?? row.trendScore}</td>
+                            <td className="p-2 text-slate-400">{row.momentumPct?.toFixed?.(3) ?? row.momentumPct}</td>
+                            <td className="p-2">
+                              <span className={row.signal === "LONG" ? "text-emerald-400" : row.signal === "SHORT" ? "text-rose-400" : "text-slate-500"}>
+                                {row.signal}
+                              </span>
+                            </td>
+                            <td className="p-2">
+                              {row.hyperLong ? <span className="text-emerald-400 font-black">LONG</span> : null}
+                              {row.hyperShort ? <span className="text-rose-400 font-black"> SHORT</span> : null}
+                              {!row.hyperLong && !row.hyperShort ? <span className="text-slate-600">—</span> : null}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  {(hyperSystem.recentActions || []).length > 0 && (
+                    <div className="mt-3 text-[9px] text-slate-600 font-mono space-y-1 max-h-20 overflow-y-auto">
+                      {(hyperSystem.recentActions || []).slice(0, 5).map((a, i) => (
+                        <div key={`${a.t}-${i}`}>{a.message}</div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Main Visualization Grid */}
               <div className="grid grid-cols-12 gap-8">

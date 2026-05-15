@@ -22,6 +22,10 @@ export class HyperliquidSignalService {
   private client: HyperliquidClient;
   private topPairsCount: number;
   private lookbackDays: number;
+  private trendCache = new Map<
+    string,
+    { at: number; snapshot: { symbol: string; score: number; signal: TopPairSignal['signal']; historyPoints: number } }
+  >();
 
   constructor(client?: HyperliquidClient) {
     this.client = client ?? new HyperliquidClient();
@@ -68,23 +72,14 @@ export class HyperliquidSignalService {
   }
 
   public async getTradingHistory(symbol: string, days: number = this.lookbackDays) {
-    const historyTypes = ['priceHistory', 'ohlc', 'candles', 'history', 'tradeHistory'];
-    for (const type of historyTypes) {
-      try {
-        const data = await this.client.getInfo({ type, symbol, days });
-        if (Array.isArray(data) && data.length > 0) {
-          return data;
-        }
-      } catch {
-        // Ignore failed history queries and continue trying other valid Hyperliquid endpoints.
-      }
-    }
-    return [];
+    return this.client.getTradingHistory(symbol, days);
   }
 
-  private computeTrendScore(history: any[]) {
+  public computeTrendScore(history: any[]) {
     const prices = history
-      .map((entry) => this.parseNumber(entry.close ?? entry.price ?? entry.midPrice ?? entry.closePrice))
+      .map((entry) =>
+        this.parseNumber(entry.close ?? entry.c ?? entry.price ?? entry.midPrice ?? entry.closePrice),
+      )
       .filter((value) => value > 0);
 
     if (prices.length < 2) {
@@ -123,7 +118,7 @@ export class HyperliquidSignalService {
   public async getTopSignals() {
     const topPairs = await this.getTopTradedPairs();
     const scored = await Promise.all(topPairs.map(async (pair: TradedPair) => {
-      const signal = await this.computeSignal(pair.symbol);
+      const signal = await this.getTrendSnapshot(pair.symbol);
       return {
         ...pair,
         score: signal.score,
@@ -138,5 +133,22 @@ export class HyperliquidSignalService {
   public async isSymbolAllowed(symbol: string) {
     const top = await this.getTopTradedPairs();
     return top.some((pair: TradedPair) => pair.symbol === symbol);
+  }
+
+  /** Cached `computeSignal` to avoid hammering REST while WS pushes mids every tick. */
+  public async getTrendSnapshot(symbol: string, ttlMs: number = config.hyperTrendCacheMs) {
+    const now = Date.now();
+    const hit = this.trendCache.get(symbol);
+    if (hit && now - hit.at < ttlMs) {
+      return hit.snapshot;
+    }
+    const snapshot = await this.computeSignal(symbol);
+    this.trendCache.set(symbol, { at: now, snapshot });
+    return snapshot;
+  }
+
+  public invalidateTrendCache(symbol?: string) {
+    if (symbol) this.trendCache.delete(symbol);
+    else this.trendCache.clear();
   }
 }

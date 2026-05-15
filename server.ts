@@ -7,6 +7,8 @@ import { config } from './src/backend/config.ts';
 import { BotManager } from './src/backend/botManager.ts';
 import { HyperliquidClient } from './src/backend/exchange/hyperliquidClient.ts';
 import { HyperliquidSignalService } from './src/backend/signals/hyperliquidSignalService.ts';
+import { HyperSignalTrader, hyperSystemState } from './src/backend/signals/hyperSignalTrader.ts';
+import { HyperliquidWsHub } from './src/backend/realtime/hyperliquidWsHub.ts';
 import { RiskEngine } from './src/backend/risk/riskEngine.ts';
 
 async function startServer() {
@@ -20,6 +22,10 @@ async function startServer() {
   await botManager.initFromDb();
   const hlClient = new HyperliquidClient();
   const signalService = new HyperliquidSignalService(hlClient);
+  const wsHub = new HyperliquidWsHub();
+  wsHub.start();
+  const hyperTrader = new HyperSignalTrader(hlClient, signalService, wsHub);
+  hyperTrader.start();
 
   app.get('/api/bots', (req, res) => {
     const bots = db.prepare('SELECT * FROM bots').all();
@@ -27,10 +33,10 @@ async function startServer() {
   });
 
   app.post('/api/bots', (req, res) => {
-    const { name, strategy, symbol, config } = req.body;
+    const { name, strategy, symbol, config: botConfig } = req.body;
     const id = Math.random().toString(36).substring(7);
     db.prepare('INSERT INTO bots (id, name, strategy, symbol, status, config) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(id, name, strategy, symbol, 'STOPPED', JSON.stringify(config));
+      .run(id, name, strategy, symbol, 'STOPPED', JSON.stringify(botConfig));
     res.json({ id });
   });
 
@@ -64,10 +70,25 @@ async function startServer() {
   app.get('/api/config', (req, res) => {
     res.json({
       testnet: config.testnet,
-      wsUrl: config.testnet ? 'wss://api.hyperliquid-testnet.xyz/ws' : 'wss://api.hyperliquid.xyz/ws',
+      wsUrl: config.wsUrl,
       liveTrading: config.liveTrading,
       dryRun: config.dryRun,
       killSwitch: RiskEngine.isGlobalKillSwitchActive(),
+      topTradingPairs: config.topTradingPairs,
+      hyperSignalTrading: config.signalTradingEnabled,
+    });
+  });
+
+  app.get('/api/hyper-system', (_req, res) => {
+    res.json({
+      ...hyperSystemState,
+      config: {
+        topTradingPairs: config.topTradingPairs,
+        hyperStrongScoreMin: config.hyperStrongScoreMin,
+        hyperMomentumMinPct: config.hyperMomentumMinPct,
+        hyperOrderNotionalUsd: config.hyperOrderNotionalUsd,
+        hyperCooldownMs: config.hyperCooldownMs,
+      },
     });
   });
 
@@ -76,11 +97,15 @@ async function startServer() {
       const data = await hlClient.getMetaAndAssetCtxs();
       const universe = data[0].universe;
       const ctxs = data[1];
+      const live = wsHub.getLatestMids();
       const markets = universe.map((asset: any, index: number) => {
         const ctx = ctxs[index];
+        const sym = asset.name as string;
+        const livePx = live[sym];
         return {
-          symbol: asset.name,
-          price: ctx?.midPrice || '0',
+          symbol: sym,
+          price: livePx ?? ctx?.midPrice ?? '0',
+          liveWs: Boolean(livePx),
           dayChange: ctx?.dayNtlVlm ? ((parseFloat(ctx.midPrice) - parseFloat(ctx.prevDayPrice)) / parseFloat(ctx.prevDayPrice)) * 100 : 0,
           volume: ctx?.dayNtlVlm || '0',
           isStardust: asset.isStardust || false,

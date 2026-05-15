@@ -14,21 +14,12 @@ class FakeHyperliquidClient {
     ];
   }
 
-  async getInfo(action: any) {
-    if (action.type === 'priceHistory' && action.symbol === 'BTC') {
-      return [
-        { close: '66000' },
-        { close: '67000' },
-        { close: '68000' },
-        { close: '69000' },
-      ];
+  async getTradingHistory(symbol: string) {
+    if (symbol === 'BTC') {
+      return [{ c: '66000' }, { c: '67000' }, { c: '68000' }, { c: '69000' }];
     }
-    if (action.type === 'priceHistory' && action.symbol === 'ETH') {
-      return [
-        { close: '3600' },
-        { close: '3700' },
-        { close: '3800' },
-      ];
+    if (symbol === 'ETH') {
+      return [{ c: '3600' }, { c: '3700' }, { c: '3800' }];
     }
     return [];
   }

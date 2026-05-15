@@ -3,6 +3,7 @@ import { DCAStrategy } from './strategies/dca.ts';
 import db from './db/session.ts';
 import { RiskEngine } from './risk/riskEngine.ts';
 import { HyperliquidSignalService } from './signals/hyperliquidSignalService.ts';
+import { config as appConfig } from './config.ts';
 
 export class BotManager {
   private activeBots: Map<string, any> = new Map();
@@ -21,7 +22,7 @@ export class BotManager {
     if (config.useTopPairsOnly !== false) {
       const allowed = await this.signalService.isSymbolAllowed(botData.symbol);
       if (!allowed) {
-        throw new Error(`Symbol ${botData.symbol} is not one of the top ${config.topTradingPairs || 5} Hyperliquid traded pairs.`);
+        throw new Error(`Symbol ${botData.symbol} is not one of the top ${appConfig.topTradingPairs} Hyperliquid traded pairs.`);
       }
     }
 
