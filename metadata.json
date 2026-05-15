@@ -1,6 +1,6 @@
 {
-  "name": "HyperQuant MVP",
-  "description": "Professional-grade Hyperliquid trading bot with Grid and DCA strategies, real-time risk management, and performance dashboard.",
+  "name": "AlphaQuant Pro",
+  "description": "High-performance Hyperliquid trading engine featuring multi-strategy bots, advanced backtesting with slippage/fees, global market directory, and production-ready Docker deployment.",
   "requestFramePermissions": [],
   "majorCapabilities": ["trading", "automation", "analytics"]
 }

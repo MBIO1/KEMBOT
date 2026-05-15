@@ -7,3 +7,6 @@ coverage/
 .env*
 !.env.example
 trading_bot.db
+*.db
+*.wal
+*.shm

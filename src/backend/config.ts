@@ -57,6 +57,15 @@ export const config = {
       ? 'wss://api.hyperliquid-testnet.xyz/ws'
       : 'wss://api.hyperliquid.xyz/ws',
 
+  // Market Selection configuration
+  marketSelectionEnabled: process.env.MARKET_SELECTION_ENABLED === 'true' || false,
+  marketSelectionIntervalMs: parseInt(process.env.MARKET_SELECTION_INTERVAL_MINUTES || '60') * 60 * 1000,
+  maxSelectedMarkets: parseInt(process.env.MAX_SELECTED_MARKETS || '5'),
+  min24hVolumeUsd: parseFloat(process.env.MIN_24H_VOLUME_USD || '50000000'),
+  maxSpreadPercent: parseFloat(process.env.MAX_SPREAD_PERCENT || '0.05') / 100, // percentage to decimal
+  maxAbsFundingRate: parseFloat(process.env.MAX_ABS_FUNDING_RATE || '0.0003'),
+  marketLookbackDays: parseInt(process.env.MARKET_LOOKBACK_DAYS || '60'),
+
   // Default symbols
   supportedSymbols: ['BTC', 'ETH', 'SOL', 'SUI'],
 };

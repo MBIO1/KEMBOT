@@ -2,9 +2,10 @@ import Database from 'better-sqlite3';
 import { config } from '../config.ts';
 
 const db = new Database(config.dbPath);
-db.pragma('journal_mode = WAL');
+db.pragma("journal_mode = WAL");
 
-export function initDb() {
+console.log("[DB] Initializing database at", config.dbPath);
+try {
   // Bots table
   db.exec(`
     CREATE TABLE IF NOT EXISTS bots (
@@ -66,6 +67,14 @@ export function initDb() {
       timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
+  console.log("[DB] Database schema verified.");
+} catch (e) {
+  console.error("[DB] Critical failure during schema initialization:", e);
+}
+
+export function initDb() {
+  // Now a no-op as it's done at module load, kept for API compatibility
+  console.log("[DB] initDb() called (already initialized at load)");
 }
 
 export default db;

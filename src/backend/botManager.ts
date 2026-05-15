@@ -2,12 +2,21 @@ import { GridStrategy } from './strategies/grid.ts';
 import { DCAStrategy } from './strategies/dca.ts';
 import db from './db/session.ts';
 import { RiskEngine } from './risk/riskEngine.ts';
+import { RiskManager } from './risk/riskManager.ts';
 import { HyperliquidSignalService } from './signals/hyperliquidSignalService.ts';
+import { HyperliquidClient } from './exchange/hyperliquidClient.ts';
 import { config as appConfig } from './config.ts';
 
 export class BotManager {
   private activeBots: Map<string, any> = new Map();
   private signalService = new HyperliquidSignalService();
+  private hlClient: HyperliquidClient;
+  private riskManager: RiskManager;
+
+  constructor() {
+    this.hlClient = new HyperliquidClient();
+    this.riskManager = new RiskManager(this.hlClient);
+  }
 
   async startBot(id: string) {
     if (RiskEngine.isGlobalKillSwitchActive()) {
@@ -29,9 +38,9 @@ export class BotManager {
     let bot;
 
     if (botData.strategy === 'GRID') {
-      bot = new GridStrategy(botData.id, botData.symbol, config);
+      bot = new GridStrategy(botData.id, botData.symbol, config, this.riskManager);
     } else if (botData.strategy === 'DCA') {
-      bot = new DCAStrategy(botData.id, botData.symbol, config);
+      bot = new DCAStrategy(botData.id, botData.symbol, config, this.riskManager);
     } else {
       throw new Error(`Unknown strategy ${botData.strategy}`);
     }

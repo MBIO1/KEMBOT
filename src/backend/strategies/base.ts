@@ -1,5 +1,6 @@
 import { HyperliquidClient } from '../exchange/hyperliquidClient.ts';
 import { RiskEngine } from '../risk/riskEngine.ts';
+import { RiskManager } from '../risk/riskManager.ts';
 import db from '../db/session.ts';
 
 export abstract class BaseStrategy {
@@ -8,13 +9,16 @@ export abstract class BaseStrategy {
   protected config: any;
   protected client: HyperliquidClient;
   protected riskEngine: RiskEngine;
+  protected riskManager: RiskManager;
+  protected reduceOnly: boolean = false;
   protected isRunning: boolean = false;
 
-  constructor(id: string, symbol: string, config: any) {
+  constructor(id: string, symbol: string, config: any, riskManager: RiskManager) {
     this.id = id;
     this.symbol = symbol;
     this.config = config;
     this.client = new HyperliquidClient();
+    this.riskManager = riskManager;
     this.riskEngine = new RiskEngine({
       maxLeverage: 3,
       maxPositionSize: 1000,
@@ -129,6 +133,11 @@ export abstract class BaseStrategy {
   async stop() {
     this.isRunning = false;
     console.log(`Stopping strategy ${this.id}`);
+  }
+
+  setReduceOnly(enabled: boolean) {
+    this.reduceOnly = enabled;
+    console.log(`[${this.id}] Reduce-only mode ${enabled ? 'enabled' : 'disabled'}`);
   }
 
   private async runLoop() {
