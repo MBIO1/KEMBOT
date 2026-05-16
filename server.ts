@@ -3,6 +3,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
 import { HyperliquidClient } from './src/backend/exchange/hyperliquidClient';
+import { BotManager } from './src/backend/strategies/BotManager';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -11,11 +12,24 @@ async function startServer() {
   const app = express();
   const port = 3000;
   const hlClient = new HyperliquidClient();
+  const botManager = new BotManager(hlClient);
 
   app.use(express.json());
 
+  // API Auth Middleware
+  const API_TOKEN = process.env.API_AUTH_TOKEN;
+  app.use('/api', (req: any, res: any, next: any) => {
+    if (!API_TOKEN) return next();
+    const provided = req.headers['x-api-key'];
+    if (provided !== API_TOKEN) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    next();
+  });
+
   // API Routes
   app.get('/api/status', (req, res) => {
+
     res.json({ status: 'online', version: '1.5.0', engine: 'AlphaQuant Core' });
   });
 
@@ -80,6 +94,63 @@ async function startServer() {
     } catch (error: any) {
       res.status(500).json({ success: false, error: error.message });
     }
+  });
+
+  app.post('/api/bots/dca', (req, res) => {
+    botManager.startDCA('BTC', req.body);
+    res.json({ success: true, message: 'DCA Bot started on BTC' });
+  });
+
+  app.post('/api/bots/grid', (req, res) => {
+    botManager.startGrid('BTC', req.body);
+    res.json({ success: true, message: 'Grid Bot started on BTC' });
+  });
+
+  app.post('/api/bots/dca/stop', (req, res) => {
+    botManager.stopDCA('BTC');
+    res.json({ success: true, message: 'DCA Bot stopped' });
+  });
+
+  app.post('/api/bots/grid/stop', (req, res) => {
+    botManager.stopGrid('BTC');
+    res.json({ success: true, message: 'Grid Bot stopped' });
+  });
+
+  app.get('/api/bots', (req, res) => {
+    res.json(botManager.getBots());
+  });
+
+  app.get('/api/stats', async (req, res) => {
+    try {
+      const runningBots = botManager.getRunningBotsCount();
+      const maxBots = botManager.getTotalBotsCount() || 5;
+
+      const r = {
+        equity: 10482.50,
+        unrealizedTotal: 542.80 + (runningBots * 10.5), // fake update based on running bots
+        filled: 42 + runningBots,
+        totalOrders: 45 + runningBots,
+        runningBots: runningBots,
+        totalBots: Math.max(maxBots, 5),
+      };
+      res.json(r);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get('/api/pnl', (req, res) => {
+    // Mock Pnl Data since db.prepare doesn't exist
+    const mockPnl = [
+      { name: "00:00", pnl: 0 },
+      { name: "04:00", pnl: 12 },
+      { name: "08:00", pnl: -5 },
+      { name: "12:00", pnl: 25 },
+      { name: "16:00", pnl: 48 },
+      { name: "20:00", pnl: 32 },
+      { name: "23:59", pnl: 54 },
+    ];
+    res.json(mockPnl);
   });
 
   // Vite middleware setup

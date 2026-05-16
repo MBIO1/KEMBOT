@@ -40,7 +40,7 @@ import {
   Bar
 } from "recharts";
 
-type TabType = "dashboard" | "strategies" | "history" | "alerts" | "settings" | "activity" | "backtest";
+type TabType = "dashboard" | "strategies" | "history" | "alerts" | "settings" | "activity" | "backtest" | "bots";
 
 interface Toast {
   id: string;
@@ -50,10 +50,19 @@ interface Toast {
 
 function App() {
   const [activeTab, setActiveTab] = useState<TabType>("dashboard");
+  const [activeBots, setActiveBots] = useState<any>({ dca: {}, grid: {} });
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [marketPrices, setMarketPrices] = useState<Record<string, string>>({});
   const [pnlHistory, setPnlHistory] = useState<any[]>([]);
+  const [stats, setStats] = useState({
+    equity: 0, 
+    unrealizedTotal: 0,
+    filled: 0, 
+    totalOrders: 0,
+    runningBots: 0, 
+    totalBots: 0,
+  });
   const [accountSummary, setAccountSummary] = useState({
     balance: 0,
     drawdown: 0,
@@ -61,40 +70,67 @@ function App() {
     liqPrice: 0,
     activePositions: 0
   });
-  const [telegramConfig, setTelegramConfig] = useState({
-    enabled: false,
-    botToken: "",
-    chatId: ""
+  const [telegramConfig, setTelegramConfig] = useState(() => {
+    const saved = localStorage.getItem('aq_telegramConfig');
+    return saved ? JSON.parse(saved) : {
+      enabled: false,
+      botToken: "",
+      chatId: ""
+    };
   });
 
   // Global & Preset States
-  const [globalOrderSize, setGlobalOrderSize] = useState("100");
-  const [strategyPresets, setStrategyPresets] = useState<{name: string, type: string, config: any}[]>([]);
+  const [globalOrderSize, setGlobalOrderSize] = useState(() => {
+    return localStorage.getItem('aq_globalOrderSize') || "100";
+  });
+  const [strategyPresets, setStrategyPresets] = useState<{name: string, type: string, config: any}[]>(() => {
+    const saved = localStorage.getItem('aq_strategyPresets');
+    return saved ? JSON.parse(saved) : [];
+  });
   const [presetName, setPresetName] = useState("");
 
   // Strategy Configs - Enhanced with Margin
-  const [dcaConfig, setDcaConfig] = useState({
-    interval: "1h",
-    amount: "", // Empty to test global fallback
-    multiplier: "1.5",
-    takeProfit: "5.0",
-    marginMode: "isolated",
-    initialMargin: "500"
+  const [dcaConfig, setDcaConfig] = useState(() => {
+    const saved = localStorage.getItem('aq_dcaConfig');
+    return saved ? JSON.parse(saved) : {
+      interval: "1h",
+      amount: "", // Empty to test global fallback
+      multiplier: "1.5",
+      takeProfit: "5.0",
+      marginMode: "isolated",
+      initialMargin: "500"
+    };
   });
-  const [gridConfig, setGridConfig] = useState({
-    levels: "10",
-    spread: "1.0",
-    size: "50",
-    takeProfit: "3.0",
-    marginMode: "cross",
-    initialMargin: "1000"
+  const [gridConfig, setGridConfig] = useState(() => {
+    const saved = localStorage.getItem('aq_gridConfig');
+    return saved ? JSON.parse(saved) : {
+      levels: "10",
+      spread: "1.0",
+      size: "50",
+      takeProfit: "3.0",
+      marginMode: "cross",
+      initialMargin: "1000"
+    };
   });
 
   // Alert Thresholds
-  const [alertThresholds, setAlertThresholds] = useState({
-    maxDrawdown: "5.0",
-    liqProximity: "10.0"
+  const [alertThresholds, setAlertThresholds] = useState(() => {
+    const saved = localStorage.getItem('aq_alertThresholds');
+    return saved ? JSON.parse(saved) : {
+      maxDrawdown: "5.0",
+      liqProximity: "10.0",
+      priceTarget: "",
+      pnlChange: ""
+    };
   });
+
+  // Auto-save effects
+  useEffect(() => { localStorage.setItem('aq_telegramConfig', JSON.stringify(telegramConfig)); }, [telegramConfig]);
+  useEffect(() => { localStorage.setItem('aq_globalOrderSize', globalOrderSize); }, [globalOrderSize]);
+  useEffect(() => { localStorage.setItem('aq_strategyPresets', JSON.stringify(strategyPresets)); }, [strategyPresets]);
+  useEffect(() => { localStorage.setItem('aq_dcaConfig', JSON.stringify(dcaConfig)); }, [dcaConfig]);
+  useEffect(() => { localStorage.setItem('aq_gridConfig', JSON.stringify(gridConfig)); }, [gridConfig]);
+  useEffect(() => { localStorage.setItem('aq_alertThresholds', JSON.stringify(alertThresholds)); }, [alertThresholds]);
 
   // Backtest State
   const [backtestParams, setBacktestParams] = useState({
@@ -176,35 +212,38 @@ function App() {
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const [priceRes, accountRes] = await Promise.all([
-          fetch("/api/market/prices"),
-          fetch("/api/account/summary")
+        const [priceRes, accountRes, statsRes, pnlRes, botsRes] = await Promise.all([
+          fetch("/api/market/prices").then(r => r.ok ? r.json() : null),
+          fetch("/api/account/summary").then(r => r.ok ? r.json() : null),
+          fetch("/api/stats").then(r => r.ok ? r.json() : null),
+          fetch("/api/pnl").then(r => r.ok ? r.json() : []),
+          fetch("/api/bots").then(r => r.ok ? r.json() : {dca: {}, grid: {}})
         ]);
 
-        if (priceRes.ok) {
-          const prices = await priceRes.json();
-          setMarketPrices(prices);
-        }
+        if (priceRes) setMarketPrices(priceRes);
+        if (statsRes) setStats(statsRes);
+        if (pnlRes && pnlRes.length > 0) setPnlHistory(pnlRes);
+        if (botsRes) setActiveBots(botsRes);
 
-        if (accountRes.ok) {
-          const account = await accountRes.json();
-          setAccountSummary(account);
+        if (accountRes) {
+          setAccountSummary(accountRes);
           
-          // Seed PnL history from real balance if empty
-          setPnlHistory(prev => {
-            if (prev.length > 0) {
-              const newPoint = { 
-                name: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), 
-                pnl: account.balance 
-              };
-              const updated = [...prev.slice(-19), newPoint];
-              return updated;
-            }
-            return Array.from({ length: 20 }, (_, i) => ({
-              name: `T-${19 - i}`,
-              pnl: account.balance - (Math.random() * 500)
-            }));
-          });
+          if (!pnlRes || pnlRes.length === 0) {
+            // Seed PnL history from real balance if empty
+            setPnlHistory(prev => {
+              if (prev.length > 0) {
+                const newPoint = { 
+                  name: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), 
+                  pnl: accountRes.balance 
+                };
+                return [...prev.slice(-19), newPoint];
+              }
+              return Array.from({ length: 20 }, (_, i) => ({
+                name: `T-${19 - i}`,
+                pnl: accountRes.balance - (Math.random() * 500)
+              }));
+            });
+          }
         }
       } catch (e: any) {
         console.error("Fetch system data failed", e);
@@ -277,6 +316,7 @@ function App() {
             <SidebarLink icon={<Target size={18} />} label="Strategies" active={activeTab === "strategies"} onClick={() => { setActiveTab("strategies"); setIsSidebarOpen(false); }} />
             <SidebarLink icon={<LineChart size={18} />} label="Backtest" active={activeTab === "backtest"} onClick={() => { setActiveTab("backtest"); setIsSidebarOpen(false); }} />
             <SidebarLink icon={<History size={18} />} label="Ledger" active={activeTab === "history"} onClick={() => { setActiveTab("history"); setIsSidebarOpen(false); }} />
+            <SidebarLink icon={<Zap size={18} />} label="Bots / Instances" active={activeTab === "bots"} onClick={() => { setActiveTab("bots"); setIsSidebarOpen(false); }} />
             <SidebarLink icon={<Bell size={18} />} label="Relay Control" active={activeTab === "alerts"} onClick={() => { setActiveTab("alerts"); setIsSidebarOpen(false); }} />
             <SidebarLink icon={<Activity size={18} />} label="System Pulse" active={activeTab === "activity"} onClick={() => { setActiveTab("activity"); setIsSidebarOpen(false); }} />
             <div className="pt-8 mb-4 border-t border-white/5 opacity-50" />
@@ -349,9 +389,9 @@ function App() {
                   </div>
 
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                    <RiskMetricCard label="Max Drawdown" value={`${(accountSummary.drawdown * 100).toFixed(1)}%`} trend="-0.5%" icon={<AlertTriangle size={20} />} color="text-rose-500" />
-                    <RiskMetricCard label="Current Leverage" value={`${accountSummary.leverage}x`} trend="Steady" icon={<Shield size={20} />} color="text-cyan-500" />
-                    <RiskMetricCard label="Liquidation Price" value={`$${accountSummary.liqPrice.toLocaleString()}`} trend="+2.4%" icon={<Zap size={20} />} color="text-emerald-500" />
+                    <RiskMetricCard label="Unrealized PnL" value={`${stats.unrealizedTotal >= 0 ? '+' : ''}$${stats.unrealizedTotal.toFixed(2)}`} trend="" icon={<TrendingUp size={20} />} color={stats.unrealizedTotal >= 0 ? "text-emerald-400" : "text-rose-400"} />
+                    <RiskMetricCard label="Deployment Load" value={`${stats.runningBots} / ${stats.totalBots}`} trend="Running strategies" icon={<Cpu size={20} />} color="text-cyan-400" />
+                    <RiskMetricCard label="Fill Rate" value={stats.totalOrders > 0 ? `${Math.round((stats.filled / stats.totalOrders) * 100)}%` : '—'} trend={`${stats.filled} / ${stats.totalOrders} filled`} icon={<Activity size={20} />} color="text-slate-400" />
                   </div>
 
                   <div className="grid grid-cols-12 gap-6">
@@ -359,7 +399,7 @@ function App() {
                       <div className="bg-[#0A0C10] rounded-3xl border border-white/5 p-8 relative overflow-hidden group">
                         <div className="absolute top-0 right-0 w-64 h-64 bg-cyan-500/5 blur-[100px] pointer-events-none group-hover:bg-cyan-500/10 transition-all" />
                         <div className="flex justify-between items-center mb-8">
-                            <HeaderQuickStat label="Aggregated Balance" value={`$${accountSummary.balance.toLocaleString()}`} size="text-2xl" />
+                            <HeaderQuickStat label="Aggregated Balance" value={`$${stats.equity.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`} size="text-2xl" />
                             <div className="flex gap-2">
                               {["1H", "1D", "1W", "1M"].map(t => (
                                 <button key={t} className={`px-4 py-2 rounded-lg text-[10px] font-black tracking-widest uppercase transition-all ${t === '1D' ? 'bg-cyan-500 text-black' : 'bg-white/5 text-slate-500 hover:bg-white/10'}`}>
@@ -557,6 +597,20 @@ function App() {
                             placeholder="e.g. 10.0"
                           />
                           <p className="text-[9px] text-slate-600 font-bold uppercase tracking-tight -mt-4 italic">Triggers a high-priority Telegram relay when price within range of liq.</p>
+                          <SettingsInput 
+                            label="Price Target Alert ($)" 
+                            value={alertThresholds.priceTarget} 
+                            onChange={(e: any) => setAlertThresholds({...alertThresholds, priceTarget: e.target.value})} 
+                            placeholder="e.g. 65000"
+                          />
+                          <p className="text-[9px] text-slate-600 font-bold uppercase tracking-tight -mt-4 italic">Sends a Telegram notification when asset hits this price.</p>
+                          <SettingsInput 
+                            label="PnL Change Alert (%)" 
+                            value={alertThresholds.pnlChange} 
+                            onChange={(e: any) => setAlertThresholds({...alertThresholds, pnlChange: e.target.value})} 
+                            placeholder="e.g. 5.0"
+                          />
+                          <p className="text-[9px] text-slate-600 font-bold uppercase tracking-tight -mt-4 italic">Sends a Telegram notification when PnL moves significantly.</p>
                        </div>
                     </div>
 
@@ -640,56 +694,68 @@ function App() {
                                <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest italic">Dollar Cost Averaging</p>
                             </div>
                           </div>
-                          <div className="px-3 py-1 bg-cyan-500/10 rounded-full text-[10px] font-black text-cyan-500 uppercase tracking-widest">Active</div>
+                          
                        </div>
 
                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
                           <SettingsInput 
                             label="Interval" 
-                            value={dcaConfig.interval} 
-                            onChange={(e: any) => setDcaConfig({...dcaConfig, interval: e.target.value})} 
-                            placeholder="e.g. 1h"
+                             value={dcaConfig.interval} 
+                             onChange={(e: any) => setDcaConfig({...dcaConfig, interval: e.target.value})} 
+                             placeholder="e.g. 1h"
+                             tooltip="Time duration between executing consecutive trades in the DCA process"
                           />
                           <SettingsInput 
                             label="Amount ($)" 
-                            value={dcaConfig.amount || globalOrderSize} 
-                            onChange={(e: any) => setDcaConfig({...dcaConfig, amount: e.target.value})} 
-                            placeholder={`Fallback: $${globalOrderSize}`}
+                             value={dcaConfig.amount || globalOrderSize} 
+                             onChange={(e: any) => setDcaConfig({...dcaConfig, amount: e.target.value})} 
+                             placeholder={`Fallback: ${globalOrderSize}`}
+                             tooltip="Amount in USD to purchase iteratively"
                           />
                           <SettingsInput 
                             label="Multiplier" 
                             value={dcaConfig.multiplier} 
                             onChange={(e: any) => setDcaConfig({...dcaConfig, multiplier: e.target.value})} 
                             placeholder="e.g. 1.5"
+                            tooltip="A multiplier to increase the size of consecutive orders"
                           />
                           <SettingsInput 
                             label="Take-Profit (%)" 
                             value={dcaConfig.takeProfit} 
                             onChange={(e: any) => setDcaConfig({...dcaConfig, takeProfit: e.target.value})} 
                             placeholder="e.g. 5.0"
+                            tooltip="Target percentage gain per position"
                           />
                        </div>
 
                        <div className="pt-4 border-t border-white/5 space-y-4">
                           <h4 className="text-[9px] font-black uppercase text-slate-600 tracking-widest">Margin Architecture</h4>
                           <div className="grid grid-cols-2 gap-4">
-                             <div className="space-y-2">
-                                <label className="text-[9px] font-bold text-slate-700 uppercase">Mode</label>
+                             <div className="space-y-2 group relative">
+                                <label className="text-[9px] font-bold text-slate-700 uppercase flex items-center gap-1 w-max">Mode <span className="flex items-center justify-center w-3 h-3 text-[8px] bg-slate-800 text-slate-400 rounded-full cursor-help hover:text-white hover:bg-slate-700 transition-colors">?</span></label>
                                 <div className="flex bg-white/5 rounded-xl p-1">
                                    {['isolated', 'cross'].map(m => (
                                       <button key={m} onClick={() => setDcaConfig({...dcaConfig, marginMode: m})} className={`flex-1 py-2 text-[9px] font-black uppercase rounded-lg transition-all ${dcaConfig.marginMode === m ? 'bg-cyan-500 text-black' : 'text-slate-500'}`}>{m}</button>
                                    ))}
                                 </div>
+                                <div className="absolute left-1 bottom-full mb-2 w-max max-w-[200px] z-20 bg-[#08090C] border border-white/10 text-slate-300 text-[10px] p-3 rounded-xl opacity-0 group-hover:opacity-100 pointer-events-none transition-all hidden group-hover:block shadow-xl whitespace-normal">Isolated margin isolates risk to this bot; cross uses full account balance.</div>
                              </div>
                              <SettingsInput 
                                 label="Initial Margin ($)" 
                                 value={dcaConfig.initialMargin} 
                                 onChange={(e: any) => setDcaConfig({...dcaConfig, initialMargin: e.target.value})} 
+                                tooltip="Initial margin needed"
                              />
                           </div>
                        </div>
                        
-                       <button onClick={() => addToast("DCA Engine reconfigured", "success")} className="w-full py-4 bg-white text-black font-black uppercase text-[10px] tracking-widest rounded-2xl hover:bg-cyan-400 transition-all">Apply Parameters</button>
+                       <button 
+                          onClick={() => {
+                            addToast("DCA template configured. Go to Bots / Instances to start.", "info");
+                          }} 
+                          className="w-full py-4 bg-white/10 text-white font-black uppercase text-[10px] tracking-widest rounded-2xl hover:bg-white/20 transition-all">
+                            Save DCA Template
+                        </button>
                     </div>
 
                     {/* Grid Strategy */}
@@ -704,56 +770,68 @@ function App() {
                                <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest italic">Statistical Arbitrage</p>
                             </div>
                           </div>
-                          <div className="px-3 py-1 bg-slate-500/10 rounded-full text-[10px] font-black text-slate-500 uppercase tracking-widest">Idle</div>
+                          
                        </div>
 
                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
                           <SettingsInput 
                             label="Levels" 
-                            value={gridConfig.levels} 
-                            onChange={(e: any) => setGridConfig({...gridConfig, levels: e.target.value})} 
-                            placeholder="e.g. 10"
+                             value={gridConfig.levels} 
+                             onChange={(e: any) => setGridConfig({...gridConfig, levels: e.target.value})} 
+                             placeholder="e.g. 10"
+                             tooltip="Number of buy and sell orders created across the price action grid"
                           />
                           <SettingsInput 
                             label="Spread (%)" 
-                            value={gridConfig.spread} 
-                            onChange={(e: any) => setGridConfig({...gridConfig, spread: e.target.value})} 
-                            placeholder="e.g. 1.0"
+                             value={gridConfig.spread} 
+                             onChange={(e: any) => setGridConfig({...gridConfig, spread: e.target.value})} 
+                             placeholder="e.g. 1.0"
+                             tooltip="Distance in percentages between each grid level execution line"
                           />
                           <SettingsInput 
                             label="Size ($)" 
-                            value={gridConfig.size || globalOrderSize} 
-                            onChange={(e: any) => setGridConfig({...gridConfig, size: e.target.value})} 
-                            placeholder={`Fallback: $${globalOrderSize}`}
+                             value={gridConfig.size || globalOrderSize} 
+                             onChange={(e: any) => setGridConfig({...gridConfig, size: e.target.value})} 
+                             placeholder={`Fallback: ${globalOrderSize}`}
+                             tooltip="Dollar size allocated per grid order"
                           />
                           <SettingsInput 
                             label="Take-Profit (%)" 
                             value={gridConfig.takeProfit} 
                             onChange={(e: any) => setGridConfig({...gridConfig, takeProfit: e.target.value})} 
                             placeholder="e.g. 3.0"
+                            tooltip="Execution metric for automated selling per layer"
                           />
                        </div>
 
                        <div className="pt-4 border-t border-white/5 space-y-4">
                           <h4 className="text-[9px] font-black uppercase text-slate-600 tracking-widest">Margin Architecture</h4>
                           <div className="grid grid-cols-2 gap-4">
-                             <div className="space-y-2">
-                                <label className="text-[9px] font-bold text-slate-700 uppercase">Mode</label>
+                             <div className="space-y-2 group relative">
+                                <label className="text-[9px] font-bold text-slate-700 uppercase flex items-center gap-1 w-max">Mode <span className="flex items-center justify-center w-3 h-3 text-[8px] bg-slate-800 text-slate-400 rounded-full cursor-help hover:text-white hover:bg-slate-700 transition-colors">?</span></label>
                                 <div className="flex bg-white/5 rounded-xl p-1">
                                    {['isolated', 'cross'].map(m => (
                                       <button key={m} onClick={() => setGridConfig({...gridConfig, marginMode: m})} className={`flex-1 py-2 text-[9px] font-black uppercase rounded-lg transition-all ${gridConfig.marginMode === m ? 'bg-indigo-600 text-white' : 'text-slate-500'}`}>{m}</button>
                                    ))}
                                 </div>
+                                <div className="absolute left-1 bottom-full mb-2 w-max max-w-[200px] z-20 bg-[#08090C] border border-white/10 text-slate-300 text-[10px] p-3 rounded-xl opacity-0 group-hover:opacity-100 pointer-events-none transition-all hidden group-hover:block shadow-xl whitespace-normal">Isolated margin isolates risk to this grid bot; cross uses full account balance.</div>
                              </div>
                              <SettingsInput 
                                 label="Initial Margin ($)" 
                                 value={gridConfig.initialMargin} 
                                 onChange={(e: any) => setGridConfig({...gridConfig, initialMargin: e.target.value})} 
+                                tooltip="Initial margin needed specifically allocated to running the total required grid architecture"
                              />
                           </div>
                        </div>
 
-                       <button onClick={() => addToast("Grid configuration modified", "success")} className="w-full py-4 bg-indigo-600 text-white font-black uppercase text-[10px] tracking-widest rounded-2xl hover:bg-indigo-500 transition-all">Apply Parameters</button>
+                       <button 
+                          onClick={() => {
+                            addToast("Grid template configured. Go to Bots / Instances to start.", "info");
+                          }} 
+                          className="w-full py-4 bg-indigo-500/20 text-indigo-400 font-black uppercase text-[10px] tracking-widest rounded-2xl hover:bg-indigo-500/40 transition-all">
+                            Save Grid Template
+                        </button>
                     </div>
                   </div>
                 </div>
@@ -991,10 +1069,15 @@ function RiskMetricCard({ label, value, trend, icon, color }: any) {
   );
 }
 
-function SettingsInput({ label, value, onChange, type = "text", placeholder = "" }: any) {
+function SettingsInput({ label, value, onChange, type = "text", placeholder = "", tooltip = "" }: any) {
   return (
-    <div className="space-y-2">
-      <label className="text-[9px] font-black uppercase tracking-widest text-slate-600 ml-1">{label}</label>
+    <div className="space-y-2 relative group flex flex-col">
+      <label className="text-[9px] font-black uppercase tracking-widest text-slate-600 ml-1 flex items-center gap-1 w-max">
+        {label}
+        {tooltip && (
+          <div className="flex items-center justify-center w-3 h-3 text-[8px] bg-slate-800 text-slate-400 rounded-full cursor-help hover:text-white hover:bg-slate-700 transition-colors">?</div>
+        )}
+      </label>
       <input 
         type={type} 
         value={value} 
@@ -1002,6 +1085,11 @@ function SettingsInput({ label, value, onChange, type = "text", placeholder = ""
         placeholder={placeholder}
         className="w-full bg-white/[0.03] border border-white/5 rounded-2xl px-5 py-4 text-xs font-black italic text-white placeholder-slate-700 focus:outline-none focus:border-cyan-500/50 transition-colors" 
       />
+      {tooltip && (
+        <div className="absolute left-1 bottom-full mb-2 w-max max-w-[200px] z-20 bg-[#08090C] border border-white/10 text-slate-300 text-[10px] p-3 rounded-xl opacity-0 group-hover:opacity-100 pointer-events-none transition-all hidden group-hover:block whitespace-normal shadow-xl">
+          {tooltip}
+        </div>
+      )}
     </div>
   );
 }
@@ -1090,63 +1178,48 @@ function CustomTooltip({ active, payload }: any) {
 }
 
 function TradingViewChart({ symbol }: { symbol: string }) {
-  const container = useRef<HTMLDivElement>(null);
-  const widgetLoaded = useRef(false);
+  const containerId = `tv_${symbol}_${Math.random().toString(36).substring(7)}`;
 
   useEffect(() => {
-    if (!container.current) return;
+    let tvScript = document.getElementById('tv-script') as HTMLScriptElement;
     
-    // Clear previous content strictly
-    const currentContainer = container.current;
-    while (currentContainer.firstChild) {
-      currentContainer.removeChild(currentContainer.firstChild);
-    }
-    
-    const script = document.createElement("script");
-    script.src = "https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js";
-    script.type = "text/javascript";
-    script.async = true;
-    
-    // Error handling for script load
-    script.onerror = (e) => {
-      console.error("TradingView script failed to load:", e);
-    };
-
-    const config = {
-      "autosize": true,
-      "symbol": `COINBASE:${symbol}USD`,
-      "interval": "1",
-      "timezone": "Etc/UTC",
-      "theme": "dark",
-      "style": "1",
-      "locale": "en",
-      "enable_publishing": false,
-      "allow_symbol_change": true,
-      "container_id": `tv_container_${symbol}`
-    };
-    
-    script.innerHTML = JSON.stringify(config);
-    
-    try {
-      currentContainer.appendChild(script);
-      widgetLoaded.current = true;
-    } catch (e) {
-      console.error("TradingView widget mount failed", e);
-    }
-
-    return () => {
-      if (currentContainer) {
-        currentContainer.innerHTML = '';
+    const initWidget = () => {
+      if (typeof (window as any).TradingView !== 'undefined') {
+        new (window as any).TradingView.widget({
+          autosize: true,
+          symbol: `COINBASE:${symbol}USD`,
+          interval: "1",
+          timezone: "Etc/UTC",
+          theme: "dark",
+          style: "1",
+          locale: "en",
+          enable_publishing: false,
+          backgroundColor: "#08090c",
+          gridColor: "rgba(255, 255, 255, 0.05)",
+          container_id: containerId,
+          hide_legend: true,
+          save_image: false,
+        });
       }
-      widgetLoaded.current = false;
     };
-  }, [symbol]);
+
+    if (!tvScript) {
+      tvScript = document.createElement('script');
+      tvScript.id = 'tv-script';
+      tvScript.src = 'https://s3.tradingview.com/tv.js';
+      tvScript.async = true;
+      tvScript.onload = initWidget;
+      document.head.appendChild(tvScript);
+    } else {
+      initWidget();
+    }
+
+  }, [symbol, containerId]);
 
   return (
     <div 
       className="w-full h-full bg-[#08090C] rounded-3xl overflow-hidden border border-white/5" 
-      ref={container} 
-      id={`tv_container_${symbol}`} 
+      id={containerId} 
     />
   );
 }

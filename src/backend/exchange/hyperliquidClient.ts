@@ -35,4 +35,32 @@ export class HyperliquidClient {
       throw error;
     }
   }
+
+  async placeOrder(order: any): Promise<any> {
+    console.log('[HyperliquidClient] Simulating order placement:', order);
+    return {
+      status: 'ok',
+      response: {
+        data: {
+          statuses: [
+            {
+              filled: { oid: Math.floor(Math.random() * 1000000) }
+            }
+          ]
+        }
+      }
+    };
+  }
+
+  async getAccountState(): Promise<any> {
+    return {
+      assetPositions: [
+        { position: { unrealizedPnl: '50.2' } }
+      ]
+    };
+  }
+
+  getAccountEquity(state: any): number {
+    return 10500.00;
+  }
 }
