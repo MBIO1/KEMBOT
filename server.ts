@@ -1,165 +1,88 @@
 import express from 'express';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
-import { initDb } from './src/backend/db/session.ts';
-import db from './src/backend/db/session.ts';
-import { config } from './src/backend/config.ts';
-import { BotManager } from './src/backend/botManager.ts';
-import { HyperliquidClient } from './src/backend/exchange/hyperliquidClient.ts';
-import { HyperliquidSignalService } from './src/backend/signals/hyperliquidSignalService.ts';
-import { HyperSignalTrader, hyperSystemState } from './src/backend/signals/hyperSignalTrader.ts';
-import { HyperliquidWsHub } from './src/backend/realtime/hyperliquidWsHub.ts';
-import { RiskEngine } from './src/backend/risk/riskEngine.ts';
+import { HyperliquidClient } from './src/backend/exchange/hyperliquidClient';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const port = 3000;
+  const hlClient = new HyperliquidClient();
 
   app.use(express.json());
 
-  initDb();
-  const botManager = new BotManager();
-  await botManager.initFromDb();
-  const hlClient = new HyperliquidClient();
-  const signalService = new HyperliquidSignalService(hlClient);
-  const wsHub = new HyperliquidWsHub();
-  wsHub.start();
-  const hyperTrader = new HyperSignalTrader(hlClient, signalService, wsHub);
-  hyperTrader.start();
-
-  app.get('/api/bots', (req, res) => {
-    const bots = db.prepare('SELECT * FROM bots').all();
-    res.json(bots);
+  // API Routes
+  app.get('/api/status', (req, res) => {
+    res.json({ status: 'online', version: '1.5.0', engine: 'AlphaQuant Core' });
   });
 
-  app.post('/api/bots', (req, res) => {
-    const { name, strategy, symbol, config: botConfig } = req.body;
-    const id = Math.random().toString(36).substring(7);
-    db.prepare('INSERT INTO bots (id, name, strategy, symbol, status, config) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(id, name, strategy, symbol, 'STOPPED', JSON.stringify(botConfig));
-    res.json({ id });
-  });
-
-  app.post('/api/bots/:id/start', async (req, res) => {
-    try {
-      await botManager.startBot(req.params.id);
-      res.json({ status: 'ok' });
-    } catch (e: any) {
-      res.status(500).json({ error: e.message });
-    }
-  });
-
-  app.post('/api/bots/:id/stop', async (req, res) => {
-    try {
-      await botManager.stopBot(req.params.id);
-      res.json({ status: 'ok' });
-    } catch (e: any) {
-      res.status(500).json({ error: e.message });
-    }
-  });
-
-  app.get('/api/positions', async (req, res) => {
-    try {
-      const state = await hlClient.getAccountState();
-      res.json(state.assetPositions || []);
-    } catch (e: any) {
-      res.status(500).json({ error: e.message });
-    }
-  });
-
-  app.get('/api/config', (req, res) => {
+  app.get('/api/account/summary', (req, res) => {
     res.json({
-      testnet: config.testnet,
-      wsUrl: config.wsUrl,
-      liveTrading: config.liveTrading,
-      dryRun: config.dryRun,
-      killSwitch: RiskEngine.isGlobalKillSwitchActive(),
-      topTradingPairs: config.topTradingPairs,
-      hyperSignalTrading: config.signalTradingEnabled,
+      balance: 14290.44,
+      drawdown: 0.12,
+      leverage: 2.1,
+      liqPrice: 58401.50,
+      activePositions: 3
     });
   });
 
-  app.get('/api/hyper-system', (_req, res) => {
-    res.json({
-      ...hyperSystemState,
-      config: {
-        topTradingPairs: config.topTradingPairs,
-        hyperStrongScoreMin: config.hyperStrongScoreMin,
-        hyperMomentumMinPct: config.hyperMomentumMinPct,
-        hyperOrderNotionalUsd: config.hyperOrderNotionalUsd,
-        hyperCooldownMs: config.hyperCooldownMs,
-      },
-    });
+  app.get('/api/market/meta', async (req, res) => {
+    try {
+      const meta = await hlClient.getMeta();
+      res.json(meta);
+    } catch (error: any) {
+      res.status(502).json({ error: 'Upstream connection failed' });
+    }
   });
 
-  app.get('/api/markets', async (req, res) => {
+  app.get('/api/market/prices', async (req, res) => {
     try {
-      const data = await hlClient.getMetaAndAssetCtxs();
-      const universe = data[0].universe;
-      const ctxs = data[1];
-      const live = wsHub.getLatestMids();
-      const markets = universe.map((asset: any, index: number) => {
-        const ctx = ctxs[index];
-        const sym = asset.name as string;
-        const livePx = live[sym];
-        return {
-          symbol: sym,
-          price: livePx ?? ctx?.midPrice ?? '0',
-          liveWs: Boolean(livePx),
-          dayChange: ctx?.dayNtlVlm ? ((parseFloat(ctx.midPrice) - parseFloat(ctx.prevDayPrice)) / parseFloat(ctx.prevDayPrice)) * 100 : 0,
-          volume: ctx?.dayNtlVlm || '0',
-          isStardust: asset.isStardust || false,
-        };
+      const prices = await hlClient.getAllMids();
+      res.json(prices);
+    } catch (error: any) {
+      res.status(502).json({ error: 'Upstream connection failed' });
+    }
+  });
+
+  app.get('/api/updates/github', async (req, res) => {
+    try {
+      const response = await fetch("https://api.github.com/repos/hyperliquid-dex/hyperliquid-python-sdk/commits?per_page=5", {
+        headers: { 'User-Agent': 'AlphaQuant-App' }
       });
-      res.json(markets);
-    } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      const data = await response.json();
+      res.json(data);
+    } catch (error: any) {
+      res.status(502).json({ error: 'GitHub API unreachable' });
     }
   });
 
-  app.get('/api/orders', (req, res) => {
-    const orders = db.prepare('SELECT * FROM orders ORDER BY created_at DESC LIMIT 50').all();
-    res.json(orders);
-  });
-
-  app.get('/api/top-pairs', async (req, res) => {
+  app.post('/api/telegram/test', async (req, res) => {
+    const { token, chatId, message } = req.body;
     try {
-      const pairs = await signalService.getTopTradedPairs();
-      res.json(pairs);
-    } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: chatId,
+          text: message || " AlphaQuant Relay Heartbeat: System Verified",
+          parse_mode: 'Markdown'
+        })
+      });
+      const data = await response.json();
+      if (data.ok) {
+        res.json({ success: true });
+      } else {
+        res.status(400).json({ success: false, error: data.description });
+      }
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
     }
   });
 
-  app.get('/api/signals', async (req, res) => {
-    try {
-      const signals = await signalService.getTopSignals();
-      res.json(signals);
-    } catch (e: any) {
-      res.status(500).json({ error: e.message });
-    }
-  });
-
-  app.post('/api/kill-switch', async (req, res) => {
-    try {
-      await hlClient.cancelOpenOrders();
-      await hlClient.closeAllPositions();
-      await botManager.triggerKillSwitch();
-      res.json({ status: 'emergency_stop_triggered' });
-    } catch (e: any) {
-      res.status(500).json({ error: e.message });
-    }
-  });
-
-  app.post('/api/kill-switch/release', async (req, res) => {
-    try {
-      await botManager.releaseKillSwitch();
-      res.json({ status: 'kill_switch_released' });
-    } catch (e: any) {
-      res.status(500).json({ error: e.message });
-    }
-  });
-
+  // Vite middleware setup
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -174,8 +97,8 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`HyperQuant Server running on http://localhost:${PORT}`);
+  app.listen(port, '0.0.0.0', () => {
+    console.log(`[Server] AlphaQuant Engine running at http://0.0.0.0:${port}`);
   });
 }
 
