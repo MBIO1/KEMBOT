@@ -54,10 +54,16 @@ async function startServer() {
 
   app.get('/api/market/prices', async (req, res) => {
     try {
-      const prices = await hlClient.getAllMids();
-      res.json(prices);
+      const restPrices = await hlClient.getAllMids();
+      const wsPrices = botManager.getLatestPrices();
+      res.json({ ...restPrices, ...wsPrices });
     } catch (error: any) {
-      res.status(502).json({ error: 'Upstream connection failed' });
+      const wsPrices = botManager.getLatestPrices();
+      if (Object.keys(wsPrices).length > 0) {
+        res.json(wsPrices);
+      } else {
+        res.status(502).json({ error: 'Upstream connection failed' });
+      }
     }
   });
 
@@ -151,6 +157,10 @@ async function startServer() {
       { name: "23:59", pnl: 54 },
     ];
     res.json(mockPnl);
+  });
+
+  app.get('/api/history', (req, res) => {
+    res.json(hlClient.tradeHistory);
   });
 
   // Vite middleware setup

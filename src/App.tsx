@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
-import { 
+import { OrderBook } from './components/OrderBook';
+import { AlertCircle, PlayCircle, StopCircle, CheckCircle2, Loader2, 
   Activity, 
   TrendingUp, 
   Zap, 
@@ -50,7 +51,9 @@ interface Toast {
 
 function App() {
   const [activeTab, setActiveTab] = useState<TabType>("dashboard");
+  const [isInitialLoad, setIsInitialLoad] = useState(true);
   const [activeBots, setActiveBots] = useState<any>({ dca: {}, grid: {} });
+  const [pendingBotAction, setPendingBotAction] = useState<string | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [marketPrices, setMarketPrices] = useState<Record<string, string>>({});
@@ -70,12 +73,14 @@ function App() {
     liqPrice: 0,
     activePositions: 0
   });
+  const lastAlertedPnLRef = useRef<number | null>(null);
   const [telegramConfig, setTelegramConfig] = useState(() => {
     const saved = localStorage.getItem('aq_telegramConfig');
     return saved ? JSON.parse(saved) : {
       enabled: false,
       botToken: "",
-      chatId: ""
+      chatId: "",
+      pnlThreshold: "5.0"
     };
   });
 
@@ -83,7 +88,7 @@ function App() {
   const [globalOrderSize, setGlobalOrderSize] = useState(() => {
     return localStorage.getItem('aq_globalOrderSize') || "100";
   });
-  const [strategyPresets, setStrategyPresets] = useState<{name: string, type: string, config: any}[]>(() => {
+  const [strategyPresets, setStrategyPresets] = useState<{name: string, dcaConfig: any, gridConfig: any}[]>(() => {
     const saved = localStorage.getItem('aq_strategyPresets');
     return saved ? JSON.parse(saved) : [];
   });
@@ -142,45 +147,64 @@ function App() {
   const [isBacktesting, setIsBacktesting] = useState(false);
   const [backtestResults, setBacktestResults] = useState<any>(null);
 
-  const savePreset = (type: string, config: any) => {
+  const savePreset = () => {
     if (!presetName) {
       addToast("Please enter a preset name", "error");
       return;
     }
-    setStrategyPresets(prev => [...prev, { name: presetName, type, config }]);
+    setStrategyPresets(prev => [...prev, { name: presetName, dcaConfig: {...dcaConfig}, gridConfig: {...gridConfig} }]);
     setPresetName("");
     addToast(`Preset '${presetName}' cached successfully`, "success");
   };
+  
+  const deletePreset = (idx: number) => {
+    setStrategyPresets(prev => prev.filter((_, i) => i !== idx));
+    addToast("Preset deleted", "info");
+  };
 
   const loadPreset = (preset: any) => {
-    if (preset.type === 'dca') setDcaConfig(preset.config);
-    if (preset.type === 'grid') setGridConfig(preset.config);
-    addToast(`Loaded preset: ${preset.name}`, "info");
+    setDcaConfig(preset.dcaConfig);
+    setGridConfig(preset.gridConfig);
+    addToast(`Loaded config from: ${preset.name}`, "info");
   };
 
   const runBacktest = () => {
     setIsBacktesting(true);
-    // Simulate backtest
+    // Simulate backtest for multiple strategies to compare
     setTimeout(() => {
-      let currentEquity = parseFloat(backtestParams.capital);
-      const results = {
-        totalProfit: (Math.random() * 2000 + 500).toFixed(2),
-        drawdown: (Math.random() * 5 + 1).toFixed(2),
-        winRate: (Math.random() * 20 + 60).toFixed(2),
-        trades: Math.floor(Math.random() * 100 + 50),
-        chartData: Array.from({ length: 30 }, (_, i) => {
-          const dailyChange = Math.floor(Math.random() * 400) - 100;
+      const strategiesToCompare = ["Grid Arbitrage", "DCA Optimizer", "Trend Following"];
+      
+      const chartDataLength = 30;
+      let chartData = Array.from({ length: chartDataLength }, (_, i) => ({ name: `Day ${i + 1}` }));
+      
+      const results = strategiesToCompare.map(strategy => {
+        let currentEquity = parseFloat(backtestParams.capital);
+        let maxEquity = currentEquity;
+        let maxDrawdown = 0;
+        
+        for (let i = 0; i < chartDataLength; i++) {
+          const dailyChange = Math.floor(Math.random() * 400) - (strategy === "Grid Arbitrage" ? 50 : 100);
           currentEquity += dailyChange;
-          return {
-            name: `Day ${i + 1}`,
-            profit: dailyChange,
-            equity: currentEquity
-          };
-        })
-      };
-      setBacktestResults(results);
+          
+          if (currentEquity > maxEquity) maxEquity = currentEquity;
+          const drawdown = ((maxEquity - currentEquity) / maxEquity) * 100;
+          if (drawdown > maxDrawdown) maxDrawdown = drawdown;
+          
+          chartData[i][strategy] = currentEquity;
+        }
+
+        return {
+          strategy,
+          totalProfit: (currentEquity - parseFloat(backtestParams.capital)).toFixed(2),
+          drawdown: maxDrawdown.toFixed(2),
+          winRate: (Math.random() * 20 + 60).toFixed(2),
+          trades: Math.floor(Math.random() * 100 + 50),
+        };
+      });
+
+      setBacktestResults({ summary: results, chartData });
       setIsBacktesting(false);
-      addToast("Backtest sequence completed.", "success");
+      addToast("Backtest comparison sequence completed.", "success");
     }, 2000);
   };
 
@@ -212,16 +236,37 @@ function App() {
   useEffect(() => {
     const fetchData = async () => {
       try {
+        const fetchSafe = (url: string, defaultVal: any) => 
+          fetch(url).then(r => r.ok ? r.json() : defaultVal).catch(() => defaultVal);
+
         const [priceRes, accountRes, statsRes, pnlRes, botsRes] = await Promise.all([
-          fetch("/api/market/prices").then(r => r.ok ? r.json() : null),
-          fetch("/api/account/summary").then(r => r.ok ? r.json() : null),
-          fetch("/api/stats").then(r => r.ok ? r.json() : null),
-          fetch("/api/pnl").then(r => r.ok ? r.json() : []),
-          fetch("/api/bots").then(r => r.ok ? r.json() : {dca: {}, grid: {}})
+          fetchSafe("/api/market/prices", null),
+          fetchSafe("/api/account/summary", null),
+          fetchSafe("/api/stats", null),
+          fetchSafe("/api/pnl", []),
+          fetchSafe("/api/bots", {dca: {}, grid: {}})
         ]);
 
         if (priceRes) setMarketPrices(priceRes);
-        if (statsRes) setStats(statsRes);
+        if (statsRes) {
+          setStats(statsRes);
+          if (telegramConfig.enabled && telegramConfig.pnlThreshold && statsRes.unrealizedTotal !== undefined) {
+             const currentUnrealized = parseFloat(statsRes.unrealizedTotal);
+             if (accountRes && accountRes.balance > 0) {
+               const pnlPercent = (currentUnrealized / accountRes.balance) * 100;
+               const threshold = parseFloat(telegramConfig.pnlThreshold);
+               
+               if (!isNaN(threshold)) {
+                  if (lastAlertedPnLRef.current === null) {
+                      lastAlertedPnLRef.current = pnlPercent;
+                  } else if (Math.abs(pnlPercent - lastAlertedPnLRef.current) >= threshold) {
+                      lastAlertedPnLRef.current = pnlPercent;
+                      sendTelegramMessage(`🚨 PnL Alert: Unrealized PnL shifted by > ${threshold}%! Current: ${pnlPercent > 0 ? '+' : ''}${pnlPercent.toFixed(2)}% (${currentUnrealized.toFixed(2)})`, false);
+                  }
+               }
+             }
+          }
+        }
         if (pnlRes && pnlRes.length > 0) setPnlHistory(pnlRes);
         if (botsRes) setActiveBots(botsRes);
 
@@ -229,7 +274,6 @@ function App() {
           setAccountSummary(accountRes);
           
           if (!pnlRes || pnlRes.length === 0) {
-            // Seed PnL history from real balance if empty
             setPnlHistory(prev => {
               if (prev.length > 0) {
                 const newPoint = { 
@@ -247,6 +291,8 @@ function App() {
         }
       } catch (e: any) {
         console.error("Fetch system data failed", e);
+      } finally {
+        setIsInitialLoad(false);
       }
     };
 
@@ -285,6 +331,29 @@ function App() {
 
   return (
     <div className="flex h-screen bg-[#030406] overflow-hidden font-sans text-slate-300">
+      <AnimatePresence>
+        {isInitialLoad && (
+          <motion.div 
+            initial={{ opacity: 1 }} 
+            exit={{ opacity: 0 }} 
+            className="fixed inset-0 z-50 flex items-center justify-center bg-[#030406] backdrop-blur-xl"
+          >
+             <div className="flex flex-col items-center gap-6">
+                <div className="relative">
+                   <div className="w-16 h-16 border-t-2 border-r-2 border-cyan-500 rounded-full animate-spin" />
+                   <div className="absolute inset-0 w-16 h-16 border-b-2 border-l-2 border-indigo-500 rounded-full animate-spin direction-reverse" />
+                   <Activity className="absolute inset-0 m-auto text-white opacity-50" size={20} />
+                </div>
+                <div className="text-center">
+                   <h2 className="text-sm font-black uppercase text-white tracking-[0.3em]">AlphaQuant</h2>
+                   <p className="text-[10px] items-center gap-2 flex font-bold tracking-widest text-slate-500 uppercase mt-2">
+                     <Loader2 className="animate-spin" size={10} /> Initializing Engine
+                   </p>
+                </div>
+             </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
       {/* Sidebar Overlay */}
       <AnimatePresence>
         {isSidebarOpen && (
@@ -315,7 +384,7 @@ function App() {
             <SidebarLink icon={<TrendingUp size={18} />} label="Live Engine" active={activeTab === "dashboard"} onClick={() => { setActiveTab("dashboard"); setIsSidebarOpen(false); }} />
             <SidebarLink icon={<Target size={18} />} label="Strategies" active={activeTab === "strategies"} onClick={() => { setActiveTab("strategies"); setIsSidebarOpen(false); }} />
             <SidebarLink icon={<LineChart size={18} />} label="Backtest" active={activeTab === "backtest"} onClick={() => { setActiveTab("backtest"); setIsSidebarOpen(false); }} />
-            <SidebarLink icon={<History size={18} />} label="Ledger" active={activeTab === "history"} onClick={() => { setActiveTab("history"); setIsSidebarOpen(false); }} />
+            <SidebarLink icon={<History size={18} />} label="Trade History" active={activeTab === "history"} onClick={() => { setActiveTab("history"); setIsSidebarOpen(false); }} />
             <SidebarLink icon={<Zap size={18} />} label="Bots / Instances" active={activeTab === "bots"} onClick={() => { setActiveTab("bots"); setIsSidebarOpen(false); }} />
             <SidebarLink icon={<Bell size={18} />} label="Relay Control" active={activeTab === "alerts"} onClick={() => { setActiveTab("alerts"); setIsSidebarOpen(false); }} />
             <SidebarLink icon={<Activity size={18} />} label="System Pulse" active={activeTab === "activity"} onClick={() => { setActiveTab("activity"); setIsSidebarOpen(false); }} />
@@ -436,27 +505,8 @@ function App() {
                       </div>
                     </div>
 
-                    <div className="col-span-12 lg:col-span-4 bg-[#0A0C10] rounded-3xl border border-white/5 p-8 flex flex-col justify-between h-full">
-                       <h3 className="text-xs font-black uppercase text-slate-500 tracking-[0.2em] mb-6">Market Watch</h3>
-                       <div className="space-y-4 flex-1 overflow-y-auto max-h-[400px] pr-2">
-                          {Object.entries(marketPrices).slice(0, 12).map(([sym, price]) => (
-                            <div key={sym} className="flex justify-between items-center p-4 bg-white/[0.02] rounded-2xl border border-white/5 hover:border-cyan-500/30 transition-colors cursor-pointer group">
-                               <div className="flex items-center gap-3">
-                                  <div className="w-8 h-8 bg-white/5 rounded-lg flex items-center justify-center text-[10px] font-black group-hover:text-cyan-400">
-                                    {sym.substring(0, 1)}
-                                  </div>
-                                  <div>
-                                    <div className="text-xs font-black text-white italic">{sym}</div>
-                                    <div className="text-[9px] font-bold text-slate-600 uppercase tracking-widest">HL Perpetuals</div>
-                                  </div>
-                               </div>
-                               <div className="text-right">
-                                  <div className="text-xs font-mono font-black text-white">${parseFloat(price).toLocaleString()}</div>
-                                  <div className="text-[9px] font-bold text-emerald-500">+1.42%</div>
-                                </div>
-                            </div>
-                          ))}
-                       </div>
+                    <div className="col-span-12 lg:col-span-4 h-full min-h-[500px]">
+                       <OrderBook coin="BTC" />
                     </div>
                   </div>
                 </div>
@@ -486,19 +536,19 @@ function App() {
                             type="password" 
                             value={telegramConfig.botToken} 
                             onChange={(e: React.ChangeEvent<HTMLInputElement>) => setTelegramConfig(prev => ({...prev, botToken: e.target.value}))} 
-                            placeholder="7082348503:AAEn..."
+                            placeholder="7082348503:AAEn..." tooltip="Your Telegram Bot Token obtained from BotFather"
                         />
                         <SettingsInput 
                             label="Chat ID" 
                             type="text" 
                             value={telegramConfig.chatId} 
                             onChange={(e: React.ChangeEvent<HTMLInputElement>) => setTelegramConfig(prev => ({...prev, chatId: e.target.value}))} 
-                            placeholder="73294823"
+                            placeholder="73294823" tooltip="The numeric ID of the chat/channel to send messages to"
                         />
                       </div>
                       <div className="flex gap-4 pt-4">
                         <button 
-                            onClick={() => {
+                            title="Saves credentials and sends a test message" onClick={() => {
                                 addToast("Config synchronized", "success");
                                 sendTelegramMessage("Relay Authentication Successful. System Secure.", true);
                             }}
@@ -516,9 +566,9 @@ function App() {
                           Risk Parameters
                        </h3>
                        <div className="space-y-4">
-                          <SettingsInput label="Global Max Leverage" value="10.0x" onChange={() => {}} />
-                          <SettingsInput label="Slippage Buffer" value="0.5%" onChange={() => {}} />
-                          <SettingsInput label="Emergency Kill Switch" value="Enabled" onChange={() => {}} />
+                          <SettingsInput label="Global Max Leverage" tooltip="Global cap on maximum leverage allowed across all strategies" value="10.0x" onChange={() => {}} />
+                          <SettingsInput label="Slippage Buffer" tooltip="Allowed slippage percentage before order rejection" value="0.5%" onChange={() => {}} />
+                          <SettingsInput label="Emergency Kill Switch" tooltip="Immediately halts all running algorithms and closes pending orders" value="Enabled" onChange={() => {}} />
                        </div>
                     </div>
 
@@ -633,6 +683,195 @@ function App() {
                 </div>
               )}
 
+              {activeTab === "bots" && (
+                <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-8">
+                  <div className="flex justify-between items-end">
+                    <h2 className="text-3xl font-black text-white italic tracking-tighter uppercase">Bot Instances</h2>
+                  </div>
+                  
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                    <div className="bg-[#0A0C10] rounded-3xl border border-white/5 p-8 space-y-6 relative group overflow-hidden">
+                      <div className="absolute top-0 right-0 w-32 h-32 bg-cyan-500/5 blur-[50px] pointer-events-none transition-all group-hover:bg-cyan-500/10" />
+                      <div className="flex justify-between items-center relative">
+                        <div className="flex items-center gap-3">
+                           <div className="w-10 h-10 rounded-xl bg-cyan-500/10 flex items-center justify-center text-cyan-500">
+                             <Layers size={18} />
+                           </div>
+                           <div>
+                             <h3 className="text-sm font-black uppercase text-white tracking-widest leading-none mb-1">DCA Engine</h3>
+                             <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest italic">Martingale Variant</p>
+                           </div>
+                        </div>
+                        
+                        {activeBots?.dca?.['BTC']?.status === 'RUNNING' ? (
+                          <div className="flex items-center gap-2 bg-cyan-500/10 px-3 py-1.5 rounded-full border border-cyan-500/20 shadow-[0_0_15px_rgba(34,211,238,0.2)]">
+                             <PlayCircle size={14} className="text-cyan-400 animate-pulse" />
+                             <span className="text-[10px] font-black text-cyan-400 uppercase tracking-widest">Running — BTC</span>
+                          </div>
+                        ) : activeBots?.dca?.['BTC']?.status === 'ERROR' ? (
+                          <div className="flex items-center gap-2 bg-rose-500/10 px-3 py-1.5 rounded-full border border-rose-500/20 shadow-[0_0_15px_rgba(244,63,94,0.2)]">
+                             <AlertCircle size={14} className="text-rose-400" />
+                             <span className="text-[10px] font-black text-rose-400 uppercase tracking-widest">Error — BTC</span>
+                          </div>
+                        ) : activeBots?.dca?.['BTC']?.status === 'STOPPED' ? (
+                          <div className="flex items-center gap-2 bg-slate-500/10 px-3 py-1.5 rounded-full border border-slate-500/20">
+                             <StopCircle size={14} className="text-slate-400" />
+                             <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Stopped — BTC</span>
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-2 bg-slate-800/50 px-3 py-1.5 rounded-full border border-white/5">
+                             <div className="w-1.5 h-1.5 rounded-full bg-slate-500" />
+                             <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Idle</span>
+                          </div>
+                        )}
+                      </div>
+                      
+                      <div className="space-y-4">
+                        <div className="flex justify-between items-center border-b border-white/5 pb-4">
+                          <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Base Asset</span>
+                          <span className="text-xs font-black text-white italic">BTC/USD</span>
+                        </div>
+                      </div>
+
+                      <div className="flex gap-4 pt-4">
+                        <motion.button 
+                          whileHover={{ scale: 1.02 }}
+                          whileTap={{ scale: 0.98 }}
+                          onClick={async () => {
+                            setPendingBotAction('start_dca_btc');
+                            try {
+                              await fetch('/api/bots/dca', {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify(dcaConfig)
+                              });
+                              // update local state
+                              setActiveBots((prev: any) => ({...prev, dca: {...prev.dca, 'BTC': {status: 'RUNNING'}}}));
+                              addToast("DCA Engine configured and started", "success");
+                            } catch(e) {
+                              addToast("Failed to start DCA", "error");
+                            }
+                            setPendingBotAction(null);
+                          }} 
+                          disabled={pendingBotAction !== null}
+                          title="Start the DCA Engine with the current configuration" className="flex-1 py-4 bg-white text-black font-black uppercase text-[10px] tracking-widest rounded-2xl transition-all shadow-[0_0_20px_rgba(34,211,238,0)] hover:shadow-[0_0_20px_rgba(34,211,238,0.4)] flex items-center justify-center gap-2">
+                            {pendingBotAction === 'start_dca_btc' ? <Loader2 className="animate-spin" size={14} /> : null}
+                            Start DCA
+                        </motion.button>
+                        <motion.button 
+                          whileHover={{ scale: 1.02 }}
+                          whileTap={{ scale: 0.98 }}
+                          onClick={async () => {
+                            setPendingBotAction('stop_dca_btc');
+                            try {
+                              await fetch('/api/bots/dca/stop', { method: 'POST' });
+                              setActiveBots((prev: any) => ({...prev, dca: {...prev.dca, 'BTC': {status: 'STOPPED'}}}));
+                              addToast("DCA Engine stopped", "info");
+                            } catch(e) {
+                              addToast("Failed to stop DCA", "error");
+                            }
+                            setPendingBotAction(null);
+                          }} 
+                          disabled={pendingBotAction !== null || !activeBots?.dca?.['BTC'] || activeBots?.dca?.['BTC']?.status !== 'RUNNING'}
+                          className={`flex-1 py-4 font-black uppercase text-[10px] tracking-widest rounded-2xl transition-all flex items-center justify-center gap-2 ${activeBots?.dca?.['BTC']?.status === 'RUNNING' ? 'bg-rose-500/10 text-rose-500 hover:bg-rose-500 hover:text-white border border-rose-500/20' : 'bg-white/5 text-slate-500 cursor-not-allowed border border-white/5'}`}>
+                            {pendingBotAction === 'stop_dca_btc' ? <Loader2 className="animate-spin" size={14} /> : null}
+                            Stop DCA
+                        </motion.button>
+                      </div>
+                    </div>
+
+                    <div className="bg-[#0A0C10] rounded-3xl border border-white/5 p-8 space-y-6 relative group overflow-hidden">
+                      <div className="absolute top-0 right-0 w-32 h-32 bg-indigo-500/5 blur-[50px] pointer-events-none transition-all group-hover:bg-indigo-500/10" />
+                      <div className="flex justify-between items-center relative">
+                        <div className="flex items-center gap-3">
+                           <div className="w-10 h-10 rounded-xl bg-indigo-500/10 flex items-center justify-center text-indigo-500">
+                             <Target size={18} />
+                           </div>
+                           <div>
+                             <h3 className="text-sm font-black uppercase text-white tracking-widest leading-none mb-1">Grid Master</h3>
+                             <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest italic">Multi-level Scalp</p>
+                           </div>
+                        </div>
+                        
+                        {activeBots?.grid?.['BTC']?.status === 'RUNNING' ? (
+                          <div className="flex items-center gap-2 bg-indigo-500/10 px-3 py-1.5 rounded-full border border-indigo-500/20 shadow-[0_0_15px_rgba(99,102,241,0.2)]">
+                             <PlayCircle size={14} className="text-indigo-400 animate-pulse" />
+                             <span className="text-[10px] font-black text-indigo-400 uppercase tracking-widest">Running — BTC</span>
+                          </div>
+                        ) : activeBots?.grid?.['BTC']?.status === 'ERROR' ? (
+                          <div className="flex items-center gap-2 bg-rose-500/10 px-3 py-1.5 rounded-full border border-rose-500/20 shadow-[0_0_15px_rgba(244,63,94,0.2)]">
+                             <AlertCircle size={14} className="text-rose-400" />
+                             <span className="text-[10px] font-black text-rose-400 uppercase tracking-widest">Error — BTC</span>
+                          </div>
+                        ) : activeBots?.grid?.['BTC']?.status === 'STOPPED' ? (
+                          <div className="flex items-center gap-2 bg-slate-500/10 px-3 py-1.5 rounded-full border border-slate-500/20">
+                             <StopCircle size={14} className="text-slate-400" />
+                             <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Stopped — BTC</span>
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-2 bg-slate-800/50 px-3 py-1.5 rounded-full border border-white/5">
+                             <div className="w-1.5 h-1.5 rounded-full bg-slate-500" />
+                             <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Idle</span>
+                          </div>
+                        )}
+                      </div>
+                      
+                      <div className="space-y-4">
+                        <div className="flex justify-between items-center border-b border-white/5 pb-4">
+                          <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Base Asset</span>
+                          <span className="text-xs font-black text-white italic">BTC/USD</span>
+                        </div>
+                      </div>
+
+                      <div className="flex gap-4 pt-4">
+                        <motion.button 
+                          whileHover={{ scale: 1.02 }}
+                          whileTap={{ scale: 0.98 }}
+                          onClick={async () => {
+                            setPendingBotAction('start_grid_btc');
+                            try {
+                              await fetch('/api/bots/grid', {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify(gridConfig)
+                              });
+                              setActiveBots((prev: any) => ({...prev, grid: {...prev.grid, 'BTC': {status: 'RUNNING'}}}));
+                              addToast("Grid Master configured and started", "success");
+                            } catch(e) {
+                              addToast("Failed to start Grid", "error");
+                            }
+                            setPendingBotAction(null);
+                          }} 
+                          disabled={pendingBotAction !== null}
+                          className="flex-1 py-4 bg-indigo-600 text-white font-black uppercase text-[10px] tracking-widest rounded-2xl flex items-center justify-center gap-2 transition-all shadow-[0_0_20px_rgba(79,70,229,0)] hover:shadow-[0_0_20px_rgba(79,70,229,0.4)]">
+                            {pendingBotAction === 'start_grid_btc' ? <Loader2 className="animate-spin" size={14} /> : null}
+                            Start Grid
+                        </motion.button>
+                        <motion.button 
+                          whileHover={{ scale: 1.02 }}
+                          whileTap={{ scale: 0.98 }}
+                          onClick={async () => {
+                            setPendingBotAction('stop_grid_btc');
+                            try {
+                              await fetch('/api/bots/grid/stop', { method: 'POST' });
+                              setActiveBots((prev: any) => ({...prev, grid: {...prev.grid, 'BTC': {status: 'STOPPED'}}}));
+                              addToast("Grid Master stopped", "info");
+                            } catch(e) {
+                              addToast("Failed to stop Grid", "error");
+                            }
+                            setPendingBotAction(null);
+                          }} 
+                          disabled={pendingBotAction !== null || !activeBots?.grid?.['BTC'] || activeBots?.grid?.['BTC']?.status !== 'RUNNING'}
+                          className={`flex-1 py-4 font-black uppercase text-[10px] tracking-widest rounded-2xl transition-all flex items-center justify-center gap-2 ${activeBots?.grid?.['BTC']?.status === 'RUNNING' ? 'bg-rose-500/10 text-rose-500 hover:bg-rose-500 hover:text-white border border-rose-500/20' : 'bg-white/5 text-slate-500 cursor-not-allowed border border-white/5'}`}>
+                            {pendingBotAction === 'stop_grid_btc' ? <Loader2 className="animate-spin" size={14} /> : null}
+                            Stop Grid
+                        </motion.button>
+                      </div>
+                    </div>
+                  </div>
+                </motion.div>
+              )}
+
               {activeTab === "strategies" && (
                 <div className="space-y-8">
                   <div className="flex justify-between items-end">
@@ -644,7 +883,7 @@ function App() {
                     <div className="bg-[#0A0C10] rounded-3xl border border-white/5 p-8 space-y-6">
                       <h3 className="text-xs font-black uppercase text-cyan-500 tracking-widest">Global Defaults</h3>
                       <SettingsInput 
-                        label="Default Order Size ($)" 
+                        label="Default Order Size ($)" tooltip="Fallback size in USD if a strategy encounters an undefined size" 
                         value={globalOrderSize} 
                         onChange={(e: any) => setGlobalOrderSize(e.target.value)} 
                       />
@@ -653,17 +892,17 @@ function App() {
 
                     <div className="lg:col-span-2 bg-[#0A0C10] rounded-3xl border border-white/5 p-8 space-y-6">
                       <div className="flex justify-between items-center">
-                        <h3 className="text-xs font-black uppercase text-indigo-400 tracking-widest">Strategic Presets</h3>
+                        <h3 className="text-xs font-black uppercase text-indigo-400 tracking-widest">Global Presets</h3>
                         <div className="flex gap-2">
                            <input 
                             type="text" 
                             placeholder="Preset Name" 
                             value={presetName}
                             onChange={(e) => setPresetName(e.target.value)}
-                            className="bg-white/5 border border-white/10 rounded-lg px-3 py-1 text-[10px] font-black uppercase text-white placeholder-slate-700"
+                            className="bg-white/5 border border-white/10 rounded-lg px-3 py-1 text-[10px] font-black uppercase text-white placeholder-slate-700 focus:outline-none focus:border-indigo-500/50 transition-colors"
+                            title="Enter a name to save current DCA and Grid configurations"
                            />
-                           <button onClick={() => savePreset('dca', dcaConfig)} className="px-3 py-1 bg-cyan-500/10 text-cyan-500 rounded-lg text-[9px] font-black uppercase border border-cyan-500/20">Save DCA</button>
-                           <button onClick={() => savePreset('grid', gridConfig)} className="px-3 py-1 bg-indigo-500/10 text-indigo-500 rounded-lg text-[9px] font-black uppercase border border-indigo-500/20">Save Grid</button>
+                           <button onClick={savePreset} title="Save current DCA and Grid configurations as a global preset" className="px-3 py-1 bg-indigo-500/10 text-indigo-500 rounded-lg text-[9px] font-black uppercase border border-indigo-500/20 hover:bg-indigo-500/20 transition-all">Save Config</button>
                         </div>
                       </div>
                       <div className="flex flex-wrap gap-3">
@@ -671,10 +910,15 @@ function App() {
                            <p className="text-[10px] text-slate-600 font-bold uppercase italic p-2 border border-dashed border-white/5 rounded-xl w-full text-center">No cached presets detected</p>
                          ) : (
                            strategyPresets.map((p, i) => (
-                             <button key={i} onClick={() => loadPreset(p)} className="px-4 py-2 bg-white/5 border border-white/10 rounded-xl text-[10px] font-black uppercase tracking-widest text-slate-400 hover:text-white hover:border-cyan-500 transition-all flex items-center gap-2">
-                                <Lock size={10} className={p.type === 'dca' ? 'text-cyan-500' : 'text-indigo-500'} />
-                                {p.name}
-                             </button>
+                             <div key={i} className="flex items-center bg-white/5 border border-white/10 rounded-xl overflow-hidden group hover:border-indigo-500/50 transition-all">
+                                <button onClick={() => loadPreset(p)} title="Load this preset" className="px-4 py-2 text-[10px] font-black uppercase tracking-widest text-slate-400 hover:text-white transition-all flex items-center gap-2">
+                                  <Lock size={10} className="text-indigo-500" />
+                                  {p.name}
+                                </button>
+                                <button onClick={() => deletePreset(i)} title="Delete preset" className="px-3 py-2 bg-rose-500/10 text-rose-500 hover:bg-rose-500 hover:text-white transition-all border-l border-white/5">
+                                  <X size={10} />
+                                </button>
+                             </div>
                            ))
                          )}
                       </div>
@@ -893,58 +1137,78 @@ function App() {
                     <div className="lg:col-span-3 space-y-6">
                        {backtestResults ? (
                          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-6">
-                            <div className="grid grid-cols-1 sm:grid-cols-4 gap-6">
-                               <HeaderQuickStat label="Net Profit" value={`+$${backtestResults.totalProfit}`} color="text-emerald-500" size="text-xl" />
-                               <HeaderQuickStat label="Max Drawdown" value={`${backtestResults.drawdown}%`} color="text-rose-500" size="text-xl" />
-                               <HeaderQuickStat label="Win Rate" value={`${backtestResults.winRate}%`} size="text-xl" />
-                               <HeaderQuickStat label="Positions" value={backtestResults.trades} size="text-xl" />
+                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
+                               {backtestResults.summary.map((res: any, idx: number) => (
+                                 <div key={idx} className="bg-[#0A0C10] rounded-2xl border border-white/5 p-6 group">
+                                     <h4 className="text-xs font-black uppercase text-white tracking-widest mb-4 flex items-center justify-between">
+                                        {res.strategy}
+                                        <div className={`w-2 h-2 rounded-full ${idx === 0 ? 'bg-indigo-500' : idx === 1 ? 'bg-cyan-500' : 'bg-emerald-500'}`} />
+                                     </h4>
+                                     <div className="grid grid-cols-2 gap-4">
+                                        <div>
+                                           <div className="text-[9px] font-black uppercase text-slate-500 tracking-widest">Net Profit</div>
+                                           <div className={`text-lg font-black ${parseFloat(res.totalProfit) >= 0 ? 'text-emerald-500' : 'text-rose-500'}`}>{parseFloat(res.totalProfit) >= 0 ? '+' : ''}${res.totalProfit}</div>
+                                        </div>
+                                        <div>
+                                           <div className="text-[9px] font-black uppercase text-slate-500 tracking-widest">Max Drawdown</div>
+                                           <div className="text-lg font-black text-rose-500">{res.drawdown}%</div>
+                                        </div>
+                                        <div>
+                                           <div className="text-[9px] font-black uppercase text-slate-500 tracking-widest">Win Rate</div>
+                                           <div className="text-sm font-black text-slate-300">{res.winRate}%</div>
+                                        </div>
+                                        <div>
+                                           <div className="text-[9px] font-black uppercase text-slate-500 tracking-widest">Trades</div>
+                                           <div className="text-sm font-black text-slate-300">{res.trades}</div>
+                                        </div>
+                                     </div>
+                                 </div>
+                               ))}
                             </div>
                             <div className="bg-[#0A0C10] rounded-3xl border border-white/5 p-8 h-[450px] space-y-6">
                                <div className="flex justify-between items-center">
-                                  <h4 className="text-[10px] font-black uppercase text-slate-500 tracking-widest">Simulation Visualization</h4>
+                                  <h4 className="text-[10px] font-black uppercase text-slate-500 tracking-widest">Comparative Equity Curve</h4>
                                   <div className="flex gap-4">
-                                     <div className="flex items-center gap-2">
-                                        <div className="w-2 h-2 rounded-full bg-cyan-400" />
-                                        <span className="text-[9px] font-black text-slate-500 uppercase tracking-widest">Daily PnL</span>
-                                     </div>
-                                     <div className="flex items-center gap-2">
-                                        <div className="w-2 h-2 rounded-full bg-indigo-500" />
-                                        <span className="text-[9px] font-black text-slate-500 uppercase tracking-widest">Equity Curve</span>
-                                     </div>
+                                     {backtestResults.summary.map((res: any, idx: number) => (
+                                        <div key={idx} className="flex items-center gap-2">
+                                            <div className={`w-2 h-2 rounded-full ${idx === 0 ? 'bg-indigo-500' : idx === 1 ? 'bg-cyan-500' : 'bg-emerald-500'}`} />
+                                            <span className="text-[9px] font-black text-slate-500 uppercase tracking-widest">{res.strategy}</span>
+                                        </div>
+                                     ))}
                                   </div>
                                </div>
                                <ResponsiveContainer width="100%" height="80%">
                                   <AreaChart data={backtestResults.chartData}>
                                      <defs>
-                                        <linearGradient id="equityGradient" x1="0" y1="0" x2="0" y2="1">
+                                        <linearGradient id="equityGradient1" x1="0" y1="0" x2="0" y2="1">
                                           <stop offset="5%" stopColor="#6366f1" stopOpacity={0.1}/>
                                           <stop offset="95%" stopColor="#6366f1" stopOpacity={0}/>
+                                        </linearGradient>
+                                        <linearGradient id="equityGradient2" x1="0" y1="0" x2="0" y2="1">
+                                          <stop offset="5%" stopColor="#06b6d4" stopOpacity={0.1}/>
+                                          <stop offset="95%" stopColor="#06b6d4" stopOpacity={0}/>
+                                        </linearGradient>
+                                        <linearGradient id="equityGradient3" x1="0" y1="0" x2="0" y2="1">
+                                          <stop offset="5%" stopColor="#10b981" stopOpacity={0.1}/>
+                                          <stop offset="95%" stopColor="#10b981" stopOpacity={0}/>
                                         </linearGradient>
                                      </defs>
                                      <CartesianGrid strokeDasharray="3 3" stroke="#ffffff05" vertical={false} />
                                      <XAxis dataKey="name" hide />
-                                     <YAxis hide />
+                                     <YAxis hide domain={['dataMin - 100', 'dataMax + 100']} />
                                      <Tooltip content={<CustomTooltip />} />
-                                     <Bar dataKey="profit" fill="#22d3ee" fillOpacity={0.3} radius={[2, 2, 0, 0]} />
-                                     <Area 
-                                        type="monotone" 
-                                        dataKey="equity" 
-                                        stroke="#6366f1" 
-                                        strokeWidth={3} 
-                                        fillOpacity={1} 
-                                        fill="url(#equityGradient)" 
-                                      />
+                                     <Area type="monotone" dataKey="Grid Arbitrage" stroke="#6366f1" strokeWidth={2} fillOpacity={1} fill="url(#equityGradient1)" />
+                                     <Area type="monotone" dataKey="DCA Optimizer" stroke="#06b6d4" strokeWidth={2} fillOpacity={1} fill="url(#equityGradient2)" />
+                                     <Area type="monotone" dataKey="Trend Following" stroke="#10b981" strokeWidth={2} fillOpacity={1} fill="url(#equityGradient3)" />
                                   </AreaChart>
                                </ResponsiveContainer>
                             </div>
                          </motion.div>
                        ) : (
-                         <div className="h-full border-2 border-dashed border-white/5 rounded-3xl flex flex-col items-center justify-center text-center p-12 opacity-50">
-                            <div className="w-20 h-20 bg-white/5 rounded-full flex items-center justify-center mb-6">
-                               <LineChart size={40} className="text-slate-600" />
-                            </div>
-                            <h3 className="text-lg font-black italic text-white uppercase mb-2">Awaiting Simulation</h3>
-                            <p className="max-w-xs text-xs font-bold uppercase tracking-widest text-slate-500 italic">Configure parameters and execute the model to visualize historical performance.</p>
+                         <div className="h-full flex items-center justify-center p-8 bg-[#0A0C10] rounded-3xl border border-dashed border-white/5">
+                            <p className="text-[10px] text-slate-600 font-bold uppercase tracking-widest italic text-center w-64 leading-relaxed">
+                               Awaiting configuration. Trigger the simulation to aggregate historical data.
+                            </p>
                          </div>
                        )}
                     </div>
@@ -953,33 +1217,41 @@ function App() {
               )}
 
               {activeTab === "history" && (
-                <div className="space-y-8">
+                <div className="space-y-8 flex flex-col h-full">
                   <div className="flex justify-between items-end">
-                    <h2 className="text-3xl font-black text-white italic tracking-tighter uppercase">Execution Ledger</h2>
-                    <button onClick={downloadCSV} className="px-6 py-3 bg-white/5 border border-white/10 text-slate-400 font-black uppercase text-[10px] tracking-widest rounded-xl hover:bg-white/10 transition-all flex items-center gap-2">
+                    <h2 className="text-3xl font-black text-white italic tracking-tighter uppercase">Trade History</h2>
+                    <button onClick={exportTradesCSV} className="px-6 py-3 bg-white/5 border border-white/10 text-slate-400 font-black uppercase text-[10px] tracking-widest rounded-xl hover:bg-white/10 transition-all flex items-center gap-2">
                        <Download size={16} />
                        Export CSV
                     </button>
                   </div>
 
-                  <div className="bg-[#0A0C10] rounded-3xl border border-white/5 overflow-hidden">
-                    <table className="w-full text-left border-collapse">
+                  <div className="bg-[#0A0C10] rounded-3xl border border-white/5 overflow-auto flex-1">
+                    <table className="w-full text-left border-collapse min-w-[600px]">
                       <thead>
-                        <tr className="border-b border-white/5 bg-white/[0.02]">
+                        <tr className="border-b border-white/5 bg-white/[0.02] sticky top-0 backdrop-blur-md">
                           {["Time", "Symbol", "Side", "Size", "Price", "Realized PnL"].map(h => (
-                            <th key={h} className="px-6 py-4 text-[10px] font-black uppercase tracking-widest text-slate-500">{h}</th>
+                            <th key={h} className={`px-6 py-4 text-[10px] font-black uppercase tracking-widest text-slate-500 ${(h === 'Size' || h === 'Price' || h === 'Realized PnL') ? 'text-right' : ''}`}>{h}</th>
                           ))}
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-white/5">
-                        {pnlHistory.slice(0, 10).map((h, i) => (
+                        {tradeHistory.length === 0 ? (
+                           <tr><td colSpan={6} className="py-8 text-center text-sm font-bold text-slate-500 italic">No trades recorded</td></tr>
+                        ) : tradeHistory.map((trade: any, i: number) => (
                            <tr key={i} className="hover:bg-white/[0.01] transition-colors group">
-                              <td className="px-6 py-4 text-[10px] font-mono text-slate-500">2024-05-16 14:30:{i}</td>
-                              <td className="px-6 py-4 text-xs font-black text-white italic">HYPE</td>
-                              <td className={`px-6 py-4 text-[10px] font-black uppercase ${i % 2 === 0 ? 'text-emerald-500' : 'text-rose-500'}`}>{i % 2 === 0 ? 'BUY' : 'SELL'}</td>
-                              <td className="px-6 py-4 text-xs font-mono text-slate-200">1,240.00</td>
-                              <td className="px-6 py-4 text-xs font-mono text-slate-200">$1.2405</td>
-                              <td className={`px-6 py-4 text-xs font-mono font-black italic ${h.pnl > 500 ? 'text-emerald-500' : 'text-slate-400'}`}>+${h.pnl}</td>
+                              <td className="px-6 py-4 text-[10px] font-mono text-slate-500 whitespace-nowrap">{new Date(trade.timestamp).toLocaleString()}</td>
+                              <td className="px-6 py-4 text-xs font-black text-white italic">{trade.symbol}</td>
+                              <td className="px-6 py-4">
+                                <span className={`text-[9px] font-black uppercase tracking-widest px-2 py-1 rounded-sm ${trade.side === 'buy' ? 'bg-cyan-500/10 text-cyan-400' : 'bg-rose-500/10 text-rose-400'}`}>
+                                   {trade.side.toUpperCase()}
+                                </span>
+                              </td>
+                              <td className="px-6 py-4 text-xs font-mono text-slate-200 text-right">{trade.size}</td>
+                              <td className="px-6 py-4 text-xs font-mono text-slate-200 text-right">${parseFloat(trade.price).toLocaleString()}</td>
+                              <td className={`px-6 py-4 text-xs font-mono font-black italic text-right ${trade.pnl > 0 ? 'text-cyan-500' : trade.pnl < 0 ? 'text-rose-500' : 'text-slate-500'}`}>
+                                 {trade.pnl > 0 ? '+' : ''}{trade.pnl.toLocaleString()}
+                              </td>
                            </tr>
                         ))}
                       </tbody>
@@ -1113,8 +1385,8 @@ function GitHubActivityFeed() {
   useEffect(() => {
     const fetchUpdates = async () => {
       try {
-        const response = await fetch("/api/updates/github");
-        if (!response.ok) throw new Error("Proxy error");
+        const response = await fetch("/api/updates/github").catch(() => null);
+        if (!response || !response.ok) throw new Error("Proxy error");
         const data = await response.json();
         // Fallback for empty/error data
         if (!Array.isArray(data)) throw new Error("Invalid format");
