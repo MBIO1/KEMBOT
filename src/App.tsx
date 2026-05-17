@@ -48,6 +48,12 @@ interface Toast {
   type: "success" | "error" | "info";
 }
 
+interface TelegramConfig {
+  enabled: boolean;
+  botToken: string;
+  chatId: string;
+}
+
 function App() {
   const [activeTab, setActiveTab] = useState<TabType>("dashboard");
   const [activeBots, setActiveBots] = useState<any>({ dca: {}, grid: {} });
@@ -70,7 +76,7 @@ function App() {
     liqPrice: 0,
     activePositions: 0
   });
-  const [telegramConfig, setTelegramConfig] = useState(() => {
+  const [telegramConfig, setTelegramConfig] = useState<TelegramConfig>(() => {
     const saved = localStorage.getItem('aq_telegramConfig');
     return saved ? JSON.parse(saved) : {
       enabled: false,

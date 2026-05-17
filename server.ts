@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
 import { HyperliquidClient } from './src/backend/exchange/hyperliquidClient';
 import { BotManager } from './src/backend/strategies/BotManager';
+import { config } from './src/backend/config';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -31,6 +32,18 @@ async function startServer() {
   app.get('/api/status', (req, res) => {
 
     res.json({ status: 'online', version: '1.5.0', engine: 'AlphaQuant Core' });
+  });
+
+  app.get('/api/trading/config', (req, res) => {
+    res.json({
+      testnet: config.testnet,
+      dryRun: config.dryRun,
+      liveTrading: config.liveTrading,
+      walletConfigured: Boolean(config.walletAddress || config.privateKey),
+      privateKeyConfigured: Boolean(config.privateKey),
+      infoUrl: config.infoUrl,
+      exchangeUrl: config.exchangeUrl,
+    });
   });
 
   app.get('/api/account/summary', (req, res) => {

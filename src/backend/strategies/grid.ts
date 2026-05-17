@@ -26,7 +26,9 @@ export class GridStrategy extends BaseStrategy {
     const intervalMs = 60 * 1000;
     
     if (now - this.lastTradeTime > intervalMs) {
-      const order = { symbol: this.symbol, price: currentPrice, size: this.config.size || 50 };
+      const notionalUsd = Number(this.config.size || 50);
+      const size = notionalUsd / currentPrice;
+      const order = { symbol: this.symbol, isBuy: true, price: currentPrice, size, reduceOnly: false as const, tif: 'Ioc' as const };
       const result = await this.client.placeOrder(order);
       if (result.status === 'ok') {
         const firstStatus = result.response?.data?.statuses?.[0] ?? {};
