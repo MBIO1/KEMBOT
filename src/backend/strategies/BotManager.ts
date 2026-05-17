@@ -1,4 +1,5 @@
 import { HyperliquidClient } from "../exchange/hyperliquidClient";
+import { WebsocketClient } from "../exchange/websocketClient";
 import { DCAStrategy } from "./dca";
 import { GridStrategy } from "./grid";
 
@@ -6,10 +7,33 @@ export class BotManager {
   private dcaBots: Record<string, DCAStrategy> = {};
   private gridBots: Record<string, GridStrategy> = {};
   private client: HyperliquidClient;
+  private wsClient: WebsocketClient;
+  private latestPrices: Record<string, number> = {};
 
   constructor(client: HyperliquidClient) {
     this.client = client;
-    this.startTickLoop();
+    this.wsClient = new WebsocketClient();
+    this.setupWebsocket();
+  }
+
+  private setupWebsocket() {
+    this.wsClient.connect();
+    this.wsClient.on('priceUpdate', async ({ symbol, price }) => {
+      this.latestPrices[symbol] = price;
+      
+      // Drive strategy ticks with real-time price
+      if (this.dcaBots[symbol] && this.dcaBots[symbol].status === 'RUNNING') {
+        try {
+          await this.dcaBots[symbol].tick(price);
+        } catch(e) { /* ignore */ }
+      }
+      
+      if (this.gridBots[symbol] && this.gridBots[symbol].status === 'RUNNING') {
+        try {
+          await this.gridBots[symbol].tick(price);
+        } catch(e) { /* ignore */ }
+      }
+    });
   }
 
   startDCA(symbol: string, config: any) {
@@ -60,21 +84,7 @@ export class BotManager {
     };
   }
 
-  private startTickLoop() {
-    setInterval(async () => {
-      try {
-        const prices = await this.client.getAllMids();
-        const btcPrice = parseFloat(prices['BTC'] || '60000');
-        
-        for (const bot of Object.values(this.dcaBots)) {
-          await bot.tick(btcPrice);
-        }
-        for (const bot of Object.values(this.gridBots)) {
-          await bot.tick(btcPrice);
-        }
-      } catch (error) {
-        console.error('[BotManager] Tick Error', error);
-      }
-    }, 10000);
+  getLatestPrices() {
+    return this.latestPrices;
   }
 }

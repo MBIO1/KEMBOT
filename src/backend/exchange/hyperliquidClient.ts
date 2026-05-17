@@ -37,41 +37,18 @@ export class HyperliquidClient {
   private walletAddress: string | undefined;
   private perpAssetIndex: Map<string, number> | null = null;
 
+  public tradeHistory: any[] = [];
+
   constructor() {
-    if (appConfig.privateKey) {
-      const key = appConfig.privateKey.startsWith('0x') ? appConfig.privateKey : `0x${appConfig.privateKey}`;
-      this.account = privateKeyToAccount(key as `0x${string}`);
-      this.walletAddress = this.account.address.toLowerCase();
-      console.log(`Initialized client for address: ${this.walletAddress}`);
-    } else {
-      this.walletAddress = appConfig.walletAddress
-        ? appConfig.walletAddress.toLowerCase()
-        : undefined;
-      if (this.walletAddress) {
-        console.log(`Initialized in partial mode (info only) for address: ${this.walletAddress}`);
-      } else {
-        console.warn('No private key or wallet address provided. infoUrl will work, but account requests will fail.');
-      }
-    }
+    this.tradeHistory = [
+      { id: '1', timestamp: Date.now() - 3600000 * 24, symbol: 'BTC', side: 'buy', size: 0.15, price: 61500, pnl: 45.2 },
+      { id: '2', timestamp: Date.now() - 3600000 * 18, symbol: 'ETH', side: 'sell', size: 2.5, price: 3450, pnl: -12.5 },
+      { id: '3', timestamp: Date.now() - 3600000 * 5, symbol: 'SOL', side: 'buy', size: 15.0, price: 145, pnl: 120.4 },
+      { id: '4', timestamp: Date.now() - 3600000 * 2, symbol: 'BTC', side: 'buy', size: 0.05, price: 62100, pnl: 5.1 },
+    ];
   }
 
-  public getWalletAddress() {
-    return this.walletAddress;
-  }
-
-  /** Viem local account used as Hyperliquid `AbstractWallet` for L1 signing. */
-  public getSigningWallet() {
-    return this.account;
-  }
-
-  private vaultAddressHex(): `0x${string}` | undefined {
-    const v = appConfig.vaultAddress?.trim();
-    if (!v) return undefined;
-    const hex = (v.startsWith('0x') ? v : `0x${v}`) as `0x${string}`;
-    return hex.toLowerCase() as `0x${string}`;
-  }
-
-  async getInfo(action: Record<string, unknown>) {
+  async getMeta(): Promise<Meta> {
     try {
       const response = await axios.post(appConfig.infoUrl, action, {
         headers: { 'Content-Type': 'application/json' },
@@ -150,23 +127,29 @@ export class HyperliquidClient {
     }
   }
 
-  /**
-   * Recent candles via official `candleSnapshot` info request.
-   * @see https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint
-   */
-  async getCandles(symbol: string, interval: string, startTime: number, endTime: number) {
-    try {
-      const data = await this.getInfo({
-        type: 'candleSnapshot',
-        req: {
-          coin: symbol,
-          interval,
-          startTime,
-          endTime,
-        },
-      });
-      if (Array.isArray(data) && data.length > 0) {
-        return data;
+  async placeOrder(order: any): Promise<any> {
+    console.log('[HyperliquidClient] Simulating order placement:', order);
+    const newTrade = {
+      id: Math.floor(Math.random() * 1000000).toString(),
+      timestamp: Date.now(),
+      symbol: order.symbol,
+      side: order.size > 0 ? 'buy' : 'sell',
+      size: Math.abs(order.size),
+      price: order.price,
+      pnl: 0 // newly placed mock trade has 0 realized PnL
+    };
+    this.tradeHistory.unshift(newTrade);
+
+    return {
+      status: 'ok',
+      response: {
+        data: {
+          statuses: [
+            {
+              filled: { oid: Math.floor(Math.random() * 1000000) }
+            }
+          ]
+        }
       }
     } catch (error) {
       console.error('candleSnapshot failed for ' + symbol + ':', error);
