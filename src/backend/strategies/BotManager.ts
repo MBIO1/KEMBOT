@@ -2,6 +2,8 @@ import { HyperliquidClient } from "../exchange/hyperliquidClient";
 import { WebsocketClient } from "../exchange/websocketClient";
 import { DCAStrategy } from "./dca";
 import { GridStrategy } from "./grid";
+import { RiskManager } from "../risk/RiskManager";
+import { config } from "../config";
 
 export class BotManager {
   private dcaBots: Record<string, DCAStrategy> = {};
@@ -9,10 +11,23 @@ export class BotManager {
   private client: HyperliquidClient;
   private wsClient: WebsocketClient;
   private latestPrices: Record<string, number> = {};
+  private riskManager: RiskManager;
 
   constructor(client: HyperliquidClient) {
     this.client = client;
     this.wsClient = new WebsocketClient();
+    
+    // Initialize RiskManager with configuration
+    this.riskManager = new RiskManager({
+      maxPositionSizeUsd: config.maxPositionSizeUsd,
+      maxTotalExposureUsd: config.maxTotalExposureUsd,
+      maxLeverageAllowed: config.maxLeverageAllowed,
+      dailyLossLimitUsd: config.dailyLossLimitUsd,
+      minBalanceAlertUsd: config.minBalanceAlertUsd,
+      maxSlippagePercent: config.maxSlippagePercent,
+      orderRateLimitMs: config.orderRateLimitMs,
+    });
+    
     this.setupWebsocket();
   }
 
@@ -38,7 +53,7 @@ export class BotManager {
 
   startDCA(symbol: string, config: any) {
     if (!this.dcaBots[symbol]) {
-      this.dcaBots[symbol] = new DCAStrategy(this.client, symbol);
+      this.dcaBots[symbol] = new DCAStrategy(this.client, symbol, this.riskManager);
     }
     this.dcaBots[symbol].start(config);
   }
@@ -51,7 +66,7 @@ export class BotManager {
 
   startGrid(symbol: string, config: any) {
     if (!this.gridBots[symbol]) {
-      this.gridBots[symbol] = new GridStrategy(this.client, symbol);
+      this.gridBots[symbol] = new GridStrategy(this.client, symbol, this.riskManager);
     }
     this.gridBots[symbol].start(config);
   }
@@ -86,5 +101,30 @@ export class BotManager {
 
   getLatestPrices() {
     return this.latestPrices;
+  }
+
+  /**
+   * Get RiskManager instance for external access
+   */
+  getRiskManager(): RiskManager {
+    return this.riskManager;
+  }
+
+  /**
+   * Check account equity and liquidation risk
+   */
+  async checkAccountHealth() {
+    try {
+      const accountState = await this.client.getAccountState();
+      const equity = this.client.getAccountEquity(accountState);
+      return {
+        healthy: equity > 0,
+        equity,
+        positions: accountState.assetPositions?.length ?? 0
+      };
+    } catch (error) {
+      console.error('Account health check failed:', error);
+      return { healthy: false, equity: 0, positions: 0 };
+    }
   }
 }

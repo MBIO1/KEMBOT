@@ -68,4 +68,20 @@ export const config = {
 
   // Default symbols
   supportedSymbols: ['BTC', 'ETH', 'SOL', 'SUI'],
+
+  // ============ RISK MANAGEMENT - CRITICAL FOR LIVE TRADING ============
+  // Position & Balance Limits
+  maxPositionSizeUsd: parseInt(process.env.MAX_POSITION_SIZE_USD || '2000'),
+  maxTotalExposureUsd: parseInt(process.env.MAX_TOTAL_EXPOSURE_USD || '10000'),
+  maxLeverageAllowed: parseFloat(process.env.MAX_LEVERAGE_ALLOWED || '2'),
+  dailyLossLimitUsd: parseInt(process.env.DAILY_LOSS_LIMIT_USD || '500'),
+  minBalanceAlertUsd: parseInt(process.env.MIN_BALANCE_ALERT_USD || '100'),
+
+  // Order Execution Limits
+  maxSlippagePercent: parseFloat(process.env.MAX_SLIPPAGE_PERCENT || '0.5'),
+  orderRateLimitMs: parseInt(process.env.ORDER_RATE_LIMIT_MS || '1000'),
+
+  // Emergency Controls
+  enableEmergencyClose: process.env.ENABLE_EMERGENCY_CLOSE === 'true' || true,
+  maxOpenOrdersPerSymbol: parseInt(process.env.MAX_OPEN_ORDERS_PER_SYMBOL || '3'),
 };

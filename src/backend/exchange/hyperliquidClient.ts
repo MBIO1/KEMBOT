@@ -40,39 +40,65 @@ export class HyperliquidClient {
   public tradeHistory: any[] = [];
 
   constructor() {
-    this.tradeHistory = [
-      { id: '1', timestamp: Date.now() - 3600000 * 24, symbol: 'BTC', side: 'buy', size: 0.15, price: 61500, pnl: 45.2 },
-      { id: '2', timestamp: Date.now() - 3600000 * 18, symbol: 'ETH', side: 'sell', size: 2.5, price: 3450, pnl: -12.5 },
-      { id: '3', timestamp: Date.now() - 3600000 * 5, symbol: 'SOL', side: 'buy', size: 15.0, price: 145, pnl: 120.4 },
-      { id: '4', timestamp: Date.now() - 3600000 * 2, symbol: 'BTC', side: 'buy', size: 0.05, price: 62100, pnl: 5.1 },
-    ];
-  }
-
-  async getMeta(): Promise<Meta> {
-    try {
-      const response = await axios.post(appConfig.infoUrl, action, {
-        headers: { 'Content-Type': 'application/json' },
-        timeout: 10000,
-      });
-      return response.data;
-    } catch (error: unknown) {
-      const err = error as { response?: { data?: unknown }; message?: string };
-      if (err.response) {
-        console.error('HL Info Error Details:', err.response.data);
-      }
-      console.error('HL Info Error:', err.message);
-      throw error;
+    // Initialize account if credentials are available
+    this.initializeAccount();
+    
+    // Seed with sample history for UI testing (will be replaced by real trades)
+    if (appConfig.dryRun || !appConfig.liveTrading) {
+      this.tradeHistory = [
+        { id: '1', timestamp: Date.now() - 3600000 * 24, symbol: 'BTC', side: 'buy', size: 0.15, price: 61500, pnl: 45.2 },
+        { id: '2', timestamp: Date.now() - 3600000 * 18, symbol: 'ETH', side: 'sell', size: 2.5, price: 3450, pnl: -12.5 },
+        { id: '3', timestamp: Date.now() - 3600000 * 5, symbol: 'SOL', side: 'buy', size: 15.0, price: 145, pnl: 120.4 },
+        { id: '4', timestamp: Date.now() - 3600000 * 2, symbol: 'BTC', side: 'buy', size: 0.05, price: 62100, pnl: 5.1 },
+      ];
     }
   }
 
-  async getMeta() {
+  /**
+   * Initialize account from environment variables
+   */
+  private initializeAccount() {
+    if (!appConfig.privateKey) {
+      console.warn('⚠️  HYPERLIQUID_PRIVATE_KEY not set. Live trading disabled.');
+      return;
+    }
+
+    if (!appConfig.walletAddress) {
+      console.warn('⚠️  HYPERLIQUID_WALLET_ADDRESS not set. Live trading disabled.');
+      return;
+    }
+
+    try {
+      this.account = privateKeyToAccount(appConfig.privateKey as `0x${string}`);
+      this.walletAddress = appConfig.walletAddress;
+      console.log(`✅ Account initialized: ${this.walletAddress}`);
+      console.log(`   Network: ${appConfig.testnet ? 'TESTNET' : 'MAINNET'}`);
+      console.log(`   Live Trading: ${appConfig.liveTrading ? 'ENABLED' : 'DISABLED'}`);
+      console.log(`   Dry Run: ${appConfig.dryRun ? 'ENABLED' : 'DISABLED'}`);
+    } catch (error) {
+      console.error('❌ Failed to initialize account:', error);
+      this.account = undefined;
+      this.walletAddress = undefined;
+    }
+  }
+
+  /**
+   * Get metadata from Hyperliquid
+   */
+  async getMeta(): Promise<any> {
     return this.getInfo({ type: 'meta' });
   }
 
-  async getMetaAndAssetCtxs() {
+  /**
+   * Get metadata and asset contexts
+   */
+  async getMetaAndAssetCtxs(): Promise<any> {
     return this.getInfo({ type: 'metaAndAssetCtxs' });
   }
 
+  /**
+   * Get all mid prices (BID + ASK / 2)
+   */
   async getAllMids(): Promise<Record<string, string>> {
     return this.getInfo({ type: 'allMids' });
   }
@@ -127,36 +153,6 @@ export class HyperliquidClient {
     }
   }
 
-  async placeOrder(order: any): Promise<any> {
-    console.log('[HyperliquidClient] Simulating order placement:', order);
-    const newTrade = {
-      id: Math.floor(Math.random() * 1000000).toString(),
-      timestamp: Date.now(),
-      symbol: order.symbol,
-      side: order.size > 0 ? 'buy' : 'sell',
-      size: Math.abs(order.size),
-      price: order.price,
-      pnl: 0 // newly placed mock trade has 0 realized PnL
-    };
-    this.tradeHistory.unshift(newTrade);
-
-    return {
-      status: 'ok',
-      response: {
-        data: {
-          statuses: [
-            {
-              filled: { oid: Math.floor(Math.random() * 1000000) }
-            }
-          ]
-        }
-      }
-    } catch (error) {
-      console.error('candleSnapshot failed for ' + symbol + ':', error);
-    }
-    return [];
-  }
-
   async getTradingHistory(symbol: string, days: number) {
     const endTime = Date.now();
     const startTime = endTime - Math.max(1, days) * 24 * 60 * 60 * 1000;
@@ -177,6 +173,41 @@ export class HyperliquidClient {
       console.error(`candleSnapshot failed for ${symbol}:`, error);
     }
     return [];
+  }
+
+  /**
+   * Private: Make a REST call to Hyperliquid info endpoint
+   */
+  private async getInfo(action: Record<string, unknown>): Promise<any> {
+    try {
+      const response = await axios.post(appConfig.infoUrl, action, {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 10000,
+      });
+      return response.data;
+    } catch (error: unknown) {
+      const err = error as { response?: { data?: unknown }; message?: string };
+      if (err.response) {
+        console.error('HL Info Error Details:', err.response.data);
+      }
+      console.error('HL Info Error:', err.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Private: Get vault address hex if configured
+   */
+  private vaultAddressHex(): `0x${string}` | undefined {
+    const vaultAddress = appConfig.vaultAddress;
+    if (!vaultAddress) return undefined;
+    
+    let hexAddress = vaultAddress;
+    if (!hexAddress.startsWith('0x')) {
+      hexAddress = '0x' + hexAddress;
+    }
+    
+    return hexAddress as `0x${string}`;
   }
 
   private defaultTif(order: HyperliquidOrder): HyperliquidTif {
